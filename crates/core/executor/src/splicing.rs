@@ -9,7 +9,7 @@ use crate::{
     events::{MemoryReadRecord, MemoryWriteRecord, PageProtRecord},
     vm::{
         memory::CompressedMemory,
-        results::{CycleResult, FetchResult, LoadResult, StoreResult},
+        results::{CycleResult, FetchResult, LoadResult, StoreResult, TrapResult},
         shapes::ShapeChecker,
         syscall::SyscallRuntime,
         CoreVM,
@@ -63,8 +63,11 @@ impl SplicingVM<'_> {
         }
     }
 
-    /// Execute the next instruction at the current PC.
-    pub fn execute_instruction(&mut self) -> Result<CycleResult, ExecutionError> {
+    /// Execute the next instruction at the current PC, thie method only
+    /// executes the instruction, returns error if there is any. It does not
+    /// advance the cycle, giving the outer environment a chance to handle
+    /// certain errors (such as traps).
+    pub fn execute_instruction_inner(&mut self) -> Result<(Instruction, usize), ExecutionError> {
         let FetchResult { instruction, mr_record, pc } = self.core.fetch()?;
         if instruction.is_none() {
             unreachable!("Fetching the next instruction failed");
@@ -144,17 +147,29 @@ impl SplicingVM<'_> {
             }
         }
 
-        if instruction.is_memory_load_instruction() || instruction.is_memory_store_instruction() {
-            num_page_prot_accesses += self.enable_untrusted_programs as usize;
-        }
+        Ok((instruction, num_page_prot_accesses))
+    }
 
-        self.shape_checker.handle_instruction(
-            &instruction,
-            self.core.needs_bump_clk_high(),
-            instruction.is_memory_load_instruction() && instruction.op_a == 0,
-            self.core.needs_state_bump(&instruction),
-            num_page_prot_accesses,
-        );
+    /// Execute the next instruction at the current PC.
+    pub fn execute_instruction(&mut self) -> Result<CycleResult, ExecutionError> {
+        match self.execute_instruction_inner() {
+            Ok((instruction, mut num_page_prot_accesses)) => {
+                if instruction.is_memory_load_instruction()
+                    || instruction.is_memory_store_instruction()
+                {
+                    num_page_prot_accesses += self.enable_untrusted_programs as usize;
+                }
+                // QUESTION(min): in case of trap, do we need to call this one as well?
+                self.shape_checker.handle_instruction(
+                    &instruction,
+                    self.core.needs_bump_clk_high(),
+                    instruction.is_memory_load_instruction() && instruction.op_a == 0,
+                    self.core.needs_state_bump(&instruction),
+                    num_page_prot_accesses,
+                );
+            }
+            Err(e) => self.handle_error(e)?,
+        }
 
         Ok(self.core.advance())
     }
@@ -210,6 +225,23 @@ impl<'a> SplicingVM<'a> {
             ),
             enable_untrusted_programs,
         }
+    }
+
+    /// Handles recoverable errors such as traps
+    pub fn handle_error(&mut self, e: ExecutionError) -> Result<(), ExecutionError> {
+        let TrapResult { context, code_record, pc_record, handler_record } =
+            self.core.handle_error(e)?;
+
+        // QUESTION(min): are those enough?
+        self.touched_addresses.insert(context & !0b111, true);
+        self.touched_addresses.insert((context + 8) & !0b111, true);
+        self.touched_addresses.insert((context + 16) & !0b111, true);
+
+        self.shape_checker.handle_mem_event(context, handler_record.prev_timestamp);
+        self.shape_checker.handle_mem_event(context + 8, code_record.prev_timestamp);
+        self.shape_checker.handle_mem_event(context + 16, pc_record.prev_timestamp);
+
+        Ok(())
     }
 
     /// Execute a load instruction.
@@ -322,24 +354,28 @@ impl<'a> SyscallRuntime<'a> for SplicingVM<'a> {
         record
     }
 
-    fn mw(&mut self, addr: u64) -> MemoryWriteRecord {
-        let record = SyscallRuntime::mw(self.core_mut(), addr);
+    fn mw(&mut self, addr: u64) -> Result<MemoryWriteRecord, ExecutionError> {
+        let record = SyscallRuntime::mw(self.core_mut(), addr)?;
 
         self.shape_checker.handle_mem_event(addr, record.prev_timestamp);
 
-        record
+        Ok(record)
     }
 
-    fn mr(&mut self, addr: u64) -> MemoryReadRecord {
-        let record = SyscallRuntime::mr(self.core_mut(), addr);
+    fn mr(&mut self, addr: u64) -> Result<MemoryReadRecord, ExecutionError> {
+        let record = SyscallRuntime::mr(self.core_mut(), addr)?;
 
         self.shape_checker.handle_mem_event(addr, record.prev_timestamp);
 
-        record
+        Ok(record)
     }
 
-    fn mr_slice(&mut self, addr: u64, len: usize) -> (Vec<MemoryReadRecord>, Vec<PageProtRecord>) {
-        let (records, page_prot_records) = self.core_mut().mr_slice(addr, len);
+    fn mr_slice(
+        &mut self,
+        addr: u64,
+        len: usize,
+    ) -> Result<(Vec<MemoryReadRecord>, Vec<PageProtRecord>), ExecutionError> {
+        let (records, page_prot_records) = self.core_mut().mr_slice(addr, len)?;
 
         for record in &page_prot_records {
             self.shape_checker.handle_page_prot_event(record.page_idx, record.timestamp);
@@ -348,11 +384,15 @@ impl<'a> SyscallRuntime<'a> for SplicingVM<'a> {
             self.shape_checker.handle_mem_event(addr + i as u64 * 8, record.prev_timestamp);
         }
 
-        (records, page_prot_records)
+        Ok((records, page_prot_records))
     }
 
-    fn mw_slice(&mut self, addr: u64, len: usize) -> (Vec<MemoryWriteRecord>, Vec<PageProtRecord>) {
-        let (records, page_prot_records) = self.core_mut().mw_slice(addr, len);
+    fn mw_slice(
+        &mut self,
+        addr: u64,
+        len: usize,
+    ) -> Result<(Vec<MemoryWriteRecord>, Vec<PageProtRecord>), ExecutionError> {
+        let (records, page_prot_records) = self.core_mut().mw_slice(addr, len)?;
 
         for record in &page_prot_records {
             self.shape_checker.handle_page_prot_event(record.page_idx, record.timestamp);
@@ -361,7 +401,7 @@ impl<'a> SyscallRuntime<'a> for SplicingVM<'a> {
             self.shape_checker.handle_mem_event(addr + i as u64 * 8, record.prev_timestamp);
         }
 
-        (records, page_prot_records)
+        Ok((records, page_prot_records))
     }
 }
 

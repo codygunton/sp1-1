@@ -1,7 +1,7 @@
 use crate::{
     events::{KeccakPermuteEvent, KeccakPermutePageProtRecords, PrecompileEvent},
     vm::syscall::SyscallRuntime,
-    SyscallCode,
+    ExecutionError, SyscallCode,
 };
 
 pub(crate) const STATE_SIZE: usize = 25;
@@ -12,7 +12,7 @@ pub fn keccak256_permute<'a, RT: SyscallRuntime<'a>>(
     syscall_code: SyscallCode,
     arg1: u64,
     arg2: u64,
-) -> Option<u64> {
+) -> Result<Option<u64>, ExecutionError> {
     let state_ptr = arg1;
     if arg2 != 0 {
         panic!("Expected arg2 to be 0, got {arg2}");
@@ -20,15 +20,17 @@ pub fn keccak256_permute<'a, RT: SyscallRuntime<'a>>(
 
     let start_clk = rt.core().clk();
 
+    let state_read_page_prot_records = rt.read_slice_check(state_ptr, STATE_NUM_WORDS)?;
+    rt.increment_clk();
+    let state_write_page_prot_records = rt.write_slice_check(state_ptr, STATE_NUM_WORDS)?;
+
     // Read the current state (will be overwritten)
-    let (state_read_records, state_read_page_prot_records) =
-        rt.mr_slice(state_ptr, STATE_NUM_WORDS);
+    let state_read_records = rt.mr_slice_without_prot(state_ptr, STATE_NUM_WORDS);
 
     rt.increment_clk();
 
     // Write the new state (we don't compute the actual result in tracing mode)
-    let (state_write_records, state_write_page_prot_records) =
-        rt.mw_slice(state_ptr, STATE_NUM_WORDS);
+    let state_write_records = rt.mw_slice_without_prot(state_ptr, STATE_NUM_WORDS);
 
     if RT::TRACING {
         let (local_mem_access, local_page_prot_access) = rt.postprocess_precompile();
@@ -63,5 +65,5 @@ pub fn keccak256_permute<'a, RT: SyscallRuntime<'a>>(
         rt.add_precompile_event(syscall_code, syscall_event, PrecompileEvent::KeccakPermute(event));
     }
 
-    None
+    Ok(None)
 }

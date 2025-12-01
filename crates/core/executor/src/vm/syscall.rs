@@ -3,7 +3,7 @@ use crate::{
         MemoryLocalEvent, MemoryReadRecord, MemoryWriteRecord, PageProtLocalEvent, PageProtRecord,
         PrecompileEvent, SyscallEvent,
     },
-    ExecutionRecord, Register, SyscallCode,
+    ExecutionError, ExecutionRecord, Register, SyscallCode,
 };
 use sp1_curves::{
     edwards::ed25519::Ed25519,
@@ -15,7 +15,10 @@ use sp1_curves::{
     },
 };
 use sp1_jit::PageProtValue;
-use sp1_primitives::consts::{LOG_PAGE_SIZE, PROT_READ, PROT_WRITE};
+use sp1_primitives::consts::{
+    LOG_PAGE_SIZE, PROT_EXEC, PROT_FAILURE_EXEC, PROT_FAILURE_READ, PROT_FAILURE_WRITE, PROT_READ,
+    PROT_WRITE,
+};
 
 use super::CoreVM;
 
@@ -26,6 +29,7 @@ mod hint;
 mod mprotect;
 mod poseidon2;
 mod precompiles;
+mod sig_return;
 mod u256x2048_mul;
 mod uint256;
 mod uint256_ops;
@@ -100,6 +104,39 @@ pub trait SyscallRuntime<'a> {
         }
     }
 
+    /// Check read permission for a slice of memory
+    fn read_slice_check(
+        &mut self,
+        addr: u64,
+        len: usize,
+    ) -> Result<Vec<PageProtRecord>, ExecutionError> {
+        let first_page_idx = addr >> LOG_PAGE_SIZE;
+        let last_page_idx = (addr + (len - 1) as u64 * 8) >> LOG_PAGE_SIZE;
+        self.page_prot_range_check(first_page_idx, last_page_idx, PROT_READ)
+    }
+
+    /// Check write permission for a slice of memory
+    fn write_slice_check(
+        &mut self,
+        addr: u64,
+        len: usize,
+    ) -> Result<Vec<PageProtRecord>, ExecutionError> {
+        let first_page_idx = addr >> LOG_PAGE_SIZE;
+        let last_page_idx = (addr + (len - 1) as u64 * 8) >> LOG_PAGE_SIZE;
+        self.page_prot_range_check(first_page_idx, last_page_idx, PROT_WRITE)
+    }
+
+    /// Check read / write permission for a slice of memory
+    fn read_write_slice_check(
+        &mut self,
+        addr: u64,
+        len: usize,
+    ) -> Result<Vec<PageProtRecord>, ExecutionError> {
+        let first_page_idx = addr >> LOG_PAGE_SIZE;
+        let last_page_idx = (addr + (len - 1) as u64 * 8) >> LOG_PAGE_SIZE;
+        self.page_prot_range_check(first_page_idx, last_page_idx, PROT_READ | PROT_WRITE)
+    }
+
     /// Check page permission for a slice of pages
     #[inline]
     fn page_prot_range_check(
@@ -107,36 +144,50 @@ pub trait SyscallRuntime<'a> {
         start_page_idx: u64,
         end_page_idx: u64,
         page_prot_bitmap: u8,
-    ) -> Vec<PageProtRecord> {
+    ) -> Result<Vec<PageProtRecord>, ExecutionError> {
         let mut records = Vec::new();
         for page_idx in start_page_idx..=end_page_idx {
-            if let Some(record) = self.page_prot_check(page_idx, page_prot_bitmap) {
+            if let Some(record) = self.page_prot_check(page_idx, page_prot_bitmap)? {
                 records.push(record);
             }
         }
-        records
+        Ok(records)
     }
 
     #[inline]
-    fn page_prot_check(&mut self, page_idx: u64, page_prot_bitmap: u8) -> Option<PageProtRecord> {
+    fn page_prot_check(
+        &mut self,
+        page_idx: u64,
+        page_prot_bitmap: u8,
+    ) -> Result<Option<PageProtRecord>, ExecutionError> {
         if self.core().program.enable_untrusted_programs {
             let mem_writes = self.core_mut().mem_reads();
             let prot_value: PageProtValue =
                 mem_writes.next().expect("Precompile memory read out of bounds").into();
-            assert!(prot_value.value & page_prot_bitmap == page_prot_bitmap);
-            Some(PageProtRecord {
+
+            if (page_prot_bitmap & PROT_EXEC) != 0 && (prot_value.value & PROT_EXEC) == 0 {
+                return Err(ExecutionError::PagePermissionViolation(PROT_FAILURE_EXEC));
+            }
+            if (page_prot_bitmap & PROT_READ) != 0 && (prot_value.value & PROT_READ) == 0 {
+                return Err(ExecutionError::PagePermissionViolation(PROT_FAILURE_READ));
+            }
+            if (page_prot_bitmap & PROT_WRITE) != 0 && (prot_value.value & PROT_WRITE) == 0 {
+                return Err(ExecutionError::PagePermissionViolation(PROT_FAILURE_WRITE));
+            }
+
+            Ok(Some(PageProtRecord {
                 external_flag: false,
                 page_idx,
                 timestamp: prot_value.timestamp,
                 page_prot: prot_value.value,
-            })
+            }))
         } else {
-            None
+            Ok(None)
         }
     }
 
     #[inline]
-    fn mr(&mut self, addr: u64) -> MemoryReadRecord {
+    fn mr(&mut self, addr: u64) -> Result<MemoryReadRecord, ExecutionError> {
         self.core_mut().mr_instr(addr, PROT_READ, None)
     }
 
@@ -162,8 +213,8 @@ pub trait SyscallRuntime<'a> {
     }
 
     #[inline]
-    fn mw(&mut self, addr: u64) -> MemoryWriteRecord {
-        let prev_page_prot_record = self.page_prot_check(addr >> LOG_PAGE_SIZE, PROT_WRITE);
+    fn mw(&mut self, addr: u64) -> Result<MemoryWriteRecord, ExecutionError> {
+        let prev_page_prot_record = self.page_prot_check(addr >> LOG_PAGE_SIZE, PROT_WRITE)?;
 
         let mem_writes = self.core_mut().mem_reads();
 
@@ -178,7 +229,7 @@ pub trait SyscallRuntime<'a> {
             prev_page_prot_record,
         };
 
-        record
+        Ok(record)
     }
 
     #[inline]
@@ -200,16 +251,25 @@ pub trait SyscallRuntime<'a> {
     }
 
     #[inline]
-    fn mr_slice(&mut self, addr: u64, len: usize) -> (Vec<MemoryReadRecord>, Vec<PageProtRecord>) {
+    fn mr_slice(
+        &mut self,
+        addr: u64,
+        len: usize,
+    ) -> Result<(Vec<MemoryReadRecord>, Vec<PageProtRecord>), ExecutionError> {
         let first_page_idx = addr >> LOG_PAGE_SIZE;
         let last_page_idx = (addr + (len - 1) as u64 * 8) >> LOG_PAGE_SIZE;
         let page_prot_records =
-            self.page_prot_range_check(first_page_idx, last_page_idx, PROT_READ);
+            self.page_prot_range_check(first_page_idx, last_page_idx, PROT_READ)?;
 
+        Ok((self.mr_slice_without_prot(addr, len), page_prot_records))
+    }
+
+    #[inline]
+    fn mr_slice_without_prot(&mut self, _addr: u64, len: usize) -> Vec<MemoryReadRecord> {
         let current_clk = self.core().clk();
         let mem_reads = self.core_mut().mem_reads();
 
-        let records: Vec<MemoryReadRecord> = mem_reads
+        mem_reads
             .take(len)
             .map(|value| MemoryReadRecord {
                 value: value.value,
@@ -217,21 +277,29 @@ pub trait SyscallRuntime<'a> {
                 prev_timestamp: value.clk,
                 prev_page_prot_record: None,
             })
-            .collect();
-
-        (records, page_prot_records)
+            .collect()
     }
 
-    fn mw_slice(&mut self, addr: u64, len: usize) -> (Vec<MemoryWriteRecord>, Vec<PageProtRecord>) {
+    #[inline]
+    fn mw_slice(
+        &mut self,
+        addr: u64,
+        len: usize,
+    ) -> Result<(Vec<MemoryWriteRecord>, Vec<PageProtRecord>), ExecutionError> {
         let first_page_idx = addr >> LOG_PAGE_SIZE;
         let last_page_idx = (addr + (len - 1) as u64 * 8) >> LOG_PAGE_SIZE;
         let page_prot_records =
-            self.page_prot_range_check(first_page_idx, last_page_idx, PROT_WRITE);
+            self.page_prot_range_check(first_page_idx, last_page_idx, PROT_WRITE)?;
 
+        Ok((self.mw_slice_without_prot(addr, len), page_prot_records))
+    }
+
+    #[inline]
+    fn mw_slice_without_prot(&mut self, _addr: u64, len: usize) -> Vec<MemoryWriteRecord> {
         let mem_writes = self.core_mut().mem_reads();
 
         let raw_records: Vec<_> = mem_writes.take(len * 2).collect();
-        let records: Vec<MemoryWriteRecord> = raw_records
+        raw_records
             .chunks(2)
             .map(|chunk| {
                 #[allow(clippy::manual_let_else)]
@@ -248,9 +316,7 @@ pub trait SyscallRuntime<'a> {
                     prev_page_prot_record: None,
                 }
             })
-            .collect();
-
-        (records, page_prot_records)
+            .collect()
     }
 
     fn mr_slice_unsafe(&mut self, len: usize) -> Vec<u64> {
@@ -281,7 +347,7 @@ pub(crate) fn sp1_ecall_handler<'a, RT: SyscallRuntime<'a>>(
     code: SyscallCode,
     args1: u64,
     args2: u64,
-) -> Option<u64> {
+) -> Result<Option<u64>, ExecutionError> {
     // Precompiles may directly modify the clock, so we need to save the current clock
     // and reset it after the syscall.
     let clk = rt.core().clk();
@@ -290,11 +356,11 @@ pub(crate) fn sp1_ecall_handler<'a, RT: SyscallRuntime<'a>>(
     let ret = match code {
         // Noop: This method just writes to uninitialized memory.
         // Since the tracing VM relies on oracled memory, this method is a no-op.
-        SyscallCode::HINT_LEN => hint::hint_len_syscall(rt, code, args1, args2),
-        SyscallCode::HALT => halt::halt_syscall(rt, code, args1, args2),
-        SyscallCode::COMMIT => commit::commit_syscall(rt, code, args1, args2),
+        SyscallCode::HINT_LEN => Ok(hint::hint_len_syscall(rt, code, args1, args2)),
+        SyscallCode::HALT => Ok(halt::halt_syscall(rt, code, args1, args2)),
+        SyscallCode::COMMIT => Ok(commit::commit_syscall(rt, code, args1, args2)),
         SyscallCode::COMMIT_DEFERRED_PROOFS => {
-            deferred::commit_deferred_proofs_syscall(rt, code, args1, args2)
+            Ok(deferred::commit_deferred_proofs_syscall(rt, code, args1, args2))
         }
         // Weierstrass curve operations
         SyscallCode::SECP256K1_ADD => {
@@ -359,12 +425,13 @@ pub(crate) fn sp1_ecall_handler<'a, RT: SyscallRuntime<'a>>(
             precompiles::fptower::fp_op::<_, Bn254BaseField>(rt, code, args1, args2)
         }
         SyscallCode::MPROTECT => mprotect::mprotect(rt, code, args1, args2),
+        SyscallCode::SIG_RETURN => sig_return::sig_return(rt, code, args1, args2),
         SyscallCode::POSEIDON2 => poseidon2::poseidon2(rt, code, args1, args2),
         SyscallCode::VERIFY_SP1_PROOF
         | SyscallCode::WRITE
         | SyscallCode::ENTER_UNCONSTRAINED
         | SyscallCode::EXIT_UNCONSTRAINED
-        | SyscallCode::HINT_READ => None,
+        | SyscallCode::HINT_READ => Ok(None),
         code @ (SyscallCode::SECP256K1_DECOMPRESS
         | SyscallCode::BLS12381_DECOMPRESS
         | SyscallCode::SECP256R1_DECOMPRESS) => {

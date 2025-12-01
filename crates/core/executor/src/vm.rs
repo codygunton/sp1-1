@@ -7,7 +7,7 @@ use crate::{
     vm::{
         results::{
             AluResult, BranchResult, CycleResult, EcallResult, FetchResult, JumpResult, LoadResult,
-            MaybeImmediate, StoreResult, UTypeResult,
+            MaybeImmediate, StoreResult, TrapResult, UTypeResult,
         },
         syscall::{sp1_ecall_handler, SyscallRuntime},
     },
@@ -140,7 +140,7 @@ impl<'a> CoreVM<'a> {
                 aligned_pc,
                 PROT_READ | PROT_EXEC,
                 Some(MemoryAccessPosition::UntrustedInstruction),
-            );
+            )?;
             let word = mr_record.value;
             if !self.pc.is_multiple_of(4) {
                 return Err(ExecutionError::InvalidMemoryAccessUntrustedProgram(self.pc));
@@ -166,6 +166,33 @@ impl<'a> CoreVM<'a> {
         } else {
             Ok(FetchResult { pc: self.pc, instruction: None, mr_record: None })
         }
+    }
+
+    #[inline]
+    /// Certain execution errors could be handled internally. For example,
+    /// when trapping is enabled, page permission faults simply traps. This
+    /// method shall be called before +advance+ to give the VM a chance to
+    /// handle some errors.
+    pub fn handle_error(&mut self, e: ExecutionError) -> Result<TrapResult, ExecutionError> {
+        if let ExecutionError::PagePermissionViolation(code) = e {
+            if let Some(trap_context_address) = self.program.trap_context {
+                // As discussed in MinimalExecutor, page permissions are ignored
+                // when handling traps
+                let handler_record = self.mr_without_prot(trap_context_address);
+                self.next_pc = handler_record.value;
+                let code_record = self.mw_without_prot(trap_context_address + 8);
+                assert_eq!(code_record.value, code);
+                let pc_record = self.mw_without_prot(trap_context_address + 16);
+
+                return Ok(TrapResult {
+                    context: trap_context_address,
+                    code_record,
+                    pc_record,
+                    handler_record,
+                });
+            }
+        }
+        Err(e)
     }
 
     #[inline]
@@ -207,7 +234,7 @@ impl<'a> CoreVM<'a> {
 
         // Compute the address.
         let addr = b.wrapping_add(imm);
-        let mr_record = self.mr_instr(addr, PROT_READ, Some(MemoryAccessPosition::Memory));
+        let mr_record = self.mr_instr(addr, PROT_READ, Some(MemoryAccessPosition::Memory))?;
         let word = mr_record.value;
 
         let a = match instruction.opcode {
@@ -272,7 +299,7 @@ impl<'a> CoreVM<'a> {
         let b = rs2_record.value;
         let a = rs1_record.value;
         let addr = b.wrapping_add(c);
-        let mut mw_record = self.mw_instr(addr, Some(MemoryAccessPosition::Memory));
+        let mut mw_record = self.mw_instr(addr, Some(MemoryAccessPosition::Memory))?;
         let word = mw_record.prev_value;
 
         let memory_store_value = match instruction.opcode {
@@ -582,7 +609,7 @@ impl<'a> CoreVM<'a> {
         let a = if code == SyscallCode::ENTER_UNCONSTRAINED {
             0
         } else {
-            sp1_ecall_handler(rt, code, b, c).unwrap_or(code as u64)
+            sp1_ecall_handler(rt, code, b, c)?.unwrap_or(code as u64)
         };
 
         // Bad borrow checker!
@@ -619,8 +646,9 @@ impl CoreVM<'_> {
         addr: u64,
         page_prot_bitmap: u8,
         position: Option<MemoryAccessPosition>,
-    ) -> MemoryReadRecord {
-        let prev_page_prot_record = self.page_prot_check(addr >> LOG_PAGE_SIZE, page_prot_bitmap);
+    ) -> Result<MemoryReadRecord, ExecutionError> {
+        let prev_page_prot_record =
+            self.page_prot_check(addr >> LOG_PAGE_SIZE, page_prot_bitmap)?;
 
         #[allow(clippy::manual_let_else)]
         let record = match self.mem_reads.next() {
@@ -630,30 +658,34 @@ impl CoreVM<'_> {
             }
         };
 
-        MemoryReadRecord {
+        Ok(MemoryReadRecord {
             value: record.value,
             timestamp: self.timestamp(position),
             prev_timestamp: record.clk,
             prev_page_prot_record,
-        }
+        })
     }
 
     #[inline]
-    fn mw_instr(&mut self, addr: u64, position: Option<MemoryAccessPosition>) -> MemoryWriteRecord {
-        let prev_page_prot_record = self.page_prot_check(addr >> LOG_PAGE_SIZE, PROT_WRITE);
+    fn mw_instr(
+        &mut self,
+        addr: u64,
+        position: Option<MemoryAccessPosition>,
+    ) -> Result<MemoryWriteRecord, ExecutionError> {
+        let prev_page_prot_record = self.page_prot_check(addr >> LOG_PAGE_SIZE, PROT_WRITE)?;
 
         let mem_writes = self.core_mut().mem_reads();
 
         let old = mem_writes.next().expect("Precompile memory read out of bounds");
 
-        MemoryWriteRecord {
+        Ok(MemoryWriteRecord {
             prev_timestamp: old.clk,
             prev_value: old.value,
             timestamp: self.timestamp(position),
             // This will be updated in execute_store
             value: 0,
             prev_page_prot_record,
-        }
+        })
     }
 
     /// Read a value from a register, updating the register entry and returning the record.

@@ -1,6 +1,7 @@
 use num::{BigUint, Integer, One};
 
 use sp1_jit::{
+    Interrupt,
     RiscRegister::{X12, X13},
     SyscallContext,
 };
@@ -15,16 +16,22 @@ pub(crate) unsafe fn u256x2048_mul(
     ctx: &mut impl SyscallContext,
     arg1: u64,
     arg2: u64,
-) -> Option<u64> {
+) -> Result<Option<u64>, Interrupt> {
     let a_ptr = arg1;
     let b_ptr = arg2;
 
     let lo_ptr = ctx.rr(X12);
     let hi_ptr = ctx.rr(X13);
 
-    let a = words_to_bytes_le_vec(ctx.mr_slice(a_ptr, U256_NUM_WORDS));
+    ctx.read_slice_check(a_ptr, U256_NUM_WORDS)?;
+    ctx.read_slice_check(b_ptr, U2048_NUM_WORDS)?;
     ctx.bump_memory_clk();
-    let b = words_to_bytes_le_vec(ctx.mr_slice(b_ptr, U2048_NUM_WORDS));
+    ctx.write_slice_check(lo_ptr, U2048_NUM_WORDS)?;
+    ctx.write_slice_check(hi_ptr, U256_NUM_WORDS)?;
+
+    let a = words_to_bytes_le_vec(ctx.mr_slice_without_prot(a_ptr, U256_NUM_WORDS));
+    ctx.bump_memory_clk();
+    let b = words_to_bytes_le_vec(ctx.mr_slice_without_prot(b_ptr, U2048_NUM_WORDS));
     let uint256_a = BigUint::from_bytes_le(&a);
     let uint2048_b = BigUint::from_bytes_le(&b);
 
@@ -43,9 +50,9 @@ pub(crate) unsafe fn u256x2048_mul(
     let hi_words = bytes_to_words_le::<U256_NUM_WORDS>(&hi_bytes);
 
     ctx.bump_memory_clk();
-    ctx.mw_slice(lo_ptr, &lo_words);
+    ctx.mw_slice_without_prot(lo_ptr, &lo_words);
     ctx.bump_memory_clk();
-    ctx.mw_slice(hi_ptr, &hi_words);
+    ctx.mw_slice_without_prot(hi_ptr, &hi_words);
 
-    None
+    Ok(None)
 }

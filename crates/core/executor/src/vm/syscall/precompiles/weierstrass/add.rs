@@ -3,7 +3,7 @@ use sp1_curves::{params::NumWords, CurveType, EllipticCurve};
 use crate::{
     events::{EllipticCurveAddEvent, EllipticCurvePageProtRecords, PrecompileEvent},
     vm::syscall::SyscallRuntime,
-    SyscallCode,
+    ExecutionError, SyscallCode,
 };
 use typenum::Unsigned;
 
@@ -12,7 +12,7 @@ pub(crate) fn weierstrass_add<'a, RT: SyscallRuntime<'a>, E: EllipticCurve>(
     syscall_code: SyscallCode,
     arg1: u64,
     arg2: u64,
-) -> Option<u64> {
+) -> Result<Option<u64>, ExecutionError> {
     let p_ptr = arg1;
     if !p_ptr.is_multiple_of(4) {
         panic!();
@@ -26,15 +26,19 @@ pub(crate) fn weierstrass_add<'a, RT: SyscallRuntime<'a>, E: EllipticCurve>(
 
     let num_words = <E::BaseField as NumWords>::WordsCurvePoint::USIZE;
 
+    let q_page_prot_records = rt.read_slice_check(q_ptr, num_words)?;
+    rt.increment_clk();
+    let write_page_prot_records = rt.read_write_slice_check(p_ptr, num_words)?;
+
     // Accessed via slice unsafe, so ununsed.
     let p = rt.mr_slice_unsafe(num_words);
 
-    let (q_memory_records, q_page_prot_records) = rt.mr_slice(q_ptr, num_words);
+    let q_memory_records = rt.mr_slice_without_prot(q_ptr, num_words);
     let q = q_memory_records.iter().map(|r| r.value).collect::<Vec<_>>();
 
     rt.increment_clk();
 
-    let (write_record, write_page_prot_records) = rt.mw_slice(p_ptr, num_words);
+    let write_record = rt.mw_slice_without_prot(p_ptr, num_words);
 
     if RT::TRACING {
         let (local_mem_access, local_page_prot_access) = rt.postprocess_precompile();
@@ -92,5 +96,5 @@ pub(crate) fn weierstrass_add<'a, RT: SyscallRuntime<'a>, E: EllipticCurve>(
         }
     }
 
-    None
+    Ok(None)
 }

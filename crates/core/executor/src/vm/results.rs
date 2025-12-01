@@ -126,3 +126,11 @@ impl CycleResult {
         matches!(self, CycleResult::TraceEnd)
     }
 }
+
+// QUESTION(min): do we need more than those?
+pub struct TrapResult {
+    pub context: u64,
+    pub code_record: MemoryWriteRecord,
+    pub pc_record: MemoryWriteRecord,
+    pub handler_record: MemoryReadRecord,
+}

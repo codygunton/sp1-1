@@ -7,7 +7,7 @@ use crate::{
         PrecompileEvent,
     },
     vm::syscall::SyscallRuntime,
-    SyscallCode,
+    ExecutionError, SyscallCode,
 };
 
 pub(crate) fn edwards_decompress<'a, RT: SyscallRuntime<'a>>(
@@ -15,7 +15,7 @@ pub(crate) fn edwards_decompress<'a, RT: SyscallRuntime<'a>>(
     syscall_code: SyscallCode,
     arg1: u64,
     arg2: u64,
-) -> Option<u64> {
+) -> Result<Option<u64>, ExecutionError> {
     let slice_ptr = arg1;
     let sign_bit = arg2;
     assert!(slice_ptr.is_multiple_of(8), "slice_ptr must be 8-byte aligned.");
@@ -25,13 +25,18 @@ pub(crate) fn edwards_decompress<'a, RT: SyscallRuntime<'a>>(
 
     let sign = sign_bit != 0;
 
-    let (y_memory_records_vec, y_page_prot_records) =
-        rt.mr_slice(slice_ptr + (COMPRESSED_POINT_BYTES as u64), WORDS_FIELD_ELEMENT);
+    let y_page_prot_records =
+        rt.read_slice_check(slice_ptr + (COMPRESSED_POINT_BYTES as u64), WORDS_FIELD_ELEMENT)?;
+    rt.increment_clk();
+    let x_page_prot_records = rt.write_slice_check(slice_ptr, WORDS_FIELD_ELEMENT)?;
+
+    let y_memory_records_vec =
+        rt.mr_slice_without_prot(slice_ptr + (COMPRESSED_POINT_BYTES as u64), WORDS_FIELD_ELEMENT);
 
     rt.increment_clk();
 
     // Write decompressed X into slice
-    let (x_memory_records_vec, x_page_prot_records) = rt.mw_slice(slice_ptr, WORDS_FIELD_ELEMENT);
+    let x_memory_records_vec = rt.mw_slice_without_prot(slice_ptr, WORDS_FIELD_ELEMENT);
 
     if RT::TRACING {
         let (local_mem_access, local_page_prot_access) = rt.postprocess_precompile();
@@ -73,5 +78,5 @@ pub(crate) fn edwards_decompress<'a, RT: SyscallRuntime<'a>>(
         rt.add_precompile_event(syscall_code, syscall_event, PrecompileEvent::EdDecompress(event));
     }
 
-    None
+    Ok(None)
 }

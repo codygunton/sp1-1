@@ -1,6 +1,10 @@
-use sp1_jit::SyscallContext;
+use sp1_jit::{Interrupt, SyscallContext};
 
-pub unsafe fn hint_read(ctx: &mut impl SyscallContext, ptr: u64, len: u64) -> Option<u64> {
+pub unsafe fn hint_read(
+    ctx: &mut impl SyscallContext,
+    ptr: u64,
+    len: u64,
+) -> Result<Option<u64>, Interrupt> {
     panic_if_input_exhausted(ctx);
 
     // SAFETY: The input stream is not empty, as checked above, so the back is not None
@@ -35,7 +39,7 @@ pub unsafe fn hint_read(ctx: &mut impl SyscallContext, ptr: u64, len: u64) -> Op
     };
     ctx.mw_hint(ptr + (chunk_count * 8) as u64, final_word);
 
-    None
+    Ok(None)
 }
 
 unsafe fn panic_if_input_exhausted(ctx: &mut impl SyscallContext) {
@@ -45,7 +49,11 @@ unsafe fn panic_if_input_exhausted(ctx: &mut impl SyscallContext) {
 }
 
 #[allow(clippy::unnecessary_wraps)]
-pub unsafe fn hint_len(ctx: &mut impl SyscallContext, _op_a: u64, _op_b: u64) -> Option<u64> {
+pub unsafe fn hint_len(
+    ctx: &mut impl SyscallContext,
+    _op_a: u64,
+    _op_b: u64,
+) -> Result<Option<u64>, Interrupt> {
     let input_stream: &mut std::collections::VecDeque<Vec<u8>> = ctx.input_buffer();
-    Some(input_stream.front().map_or(u64::MAX, |data| data.len() as u64))
+    Ok(Some(input_stream.front().map_or(u64::MAX, |data| data.len() as u64)))
 }

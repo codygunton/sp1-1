@@ -1,17 +1,17 @@
-use sp1_jit::SyscallContext;
+use sp1_jit::{Interrupt, SyscallContext};
 use sp1_primitives::consts::{PROT_READ, PROT_WRITE};
 
 pub(crate) unsafe fn sha256_extend(
     ctx: &mut impl SyscallContext,
     arg1: u64,
     arg2: u64,
-) -> Option<u64> {
+) -> Result<Option<u64>, Interrupt> {
     let w_ptr = arg1;
     assert!(arg2 == 0, "arg2 must be 0");
 
-    ctx.prot_slice_check(w_ptr, 16, PROT_READ, true);
+    ctx.prot_slice_check(w_ptr, 16, PROT_READ, true)?;
     ctx.bump_memory_clk();
-    ctx.prot_slice_check(w_ptr + 16 * 8, 48, PROT_READ | PROT_WRITE, true);
+    ctx.prot_slice_check(w_ptr + 16 * 8, 48, PROT_READ | PROT_WRITE, true)?;
 
     for i in 16..64 {
         // Read w[i-15].
@@ -45,5 +45,5 @@ pub(crate) unsafe fn sha256_extend(
         ctx.bump_memory_clk();
     }
 
-    None
+    Ok(None)
 }

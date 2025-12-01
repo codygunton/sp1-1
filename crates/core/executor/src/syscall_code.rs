@@ -173,6 +173,9 @@ pub enum SyscallCode {
 
     /// Executes the `POSEIDON2` syscall.
     POSEIDON2 = 0x00_00_01_33,
+
+    /// Executes the `SIG_RETURN` syscall.
+    SIG_RETURN = 0x00_00_01_34,
 }
 
 impl SyscallCode {
@@ -224,6 +227,7 @@ impl SyscallCode {
             #[allow(clippy::mistyped_literal_suffixes)]
             0x00_00_01_32 => SyscallCode::MPROTECT,
             0x00_00_01_33 => SyscallCode::POSEIDON2,
+            0x00_00_01_34 => SyscallCode::SIG_RETURN,
             _ => panic!("invalid syscall number: {value}"),
         }
     }
@@ -327,6 +331,7 @@ impl SyscallCode {
             SyscallCode::MPROTECT => RiscvAirId::Mprotect,
             SyscallCode::POSEIDON2 => RiscvAirId::Poseidon2,
             SyscallCode::HALT
+            | SyscallCode::SIG_RETURN
             | SyscallCode::WRITE
             | SyscallCode::ENTER_UNCONSTRAINED
             | SyscallCode::EXIT_UNCONSTRAINED
@@ -380,6 +385,7 @@ impl SyscallCode {
             SyscallCode::MPROTECT => RiscvAirId::Mprotect,
             SyscallCode::POSEIDON2 => RiscvAirId::Poseidon2User,
             SyscallCode::HALT
+            | SyscallCode::SIG_RETURN
             | SyscallCode::WRITE
             | SyscallCode::ENTER_UNCONSTRAINED
             | SyscallCode::EXIT_UNCONSTRAINED

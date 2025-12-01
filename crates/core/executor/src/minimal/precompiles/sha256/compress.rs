@@ -1,4 +1,4 @@
-use sp1_jit::SyscallContext;
+use sp1_jit::{Interrupt, SyscallContext};
 
 pub const SHA_COMPRESS_K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -23,15 +23,20 @@ pub(crate) unsafe fn sha256_compress(
     ctx: &mut impl SyscallContext,
     arg1: u64,
     arg2: u64,
-) -> Option<u64> {
+) -> Result<Option<u64>, Interrupt> {
     let w_ptr = arg1;
     let h_ptr = arg2;
     assert_ne!(w_ptr, h_ptr);
 
+    ctx.read_slice_check(h_ptr, 8)?;
+    ctx.read_slice_check(w_ptr, 64)?;
+    ctx.bump_memory_clk();
+    ctx.write_slice_check(h_ptr, 8)?;
+
     // let start_clk = ctx.clk;
 
     // Execute the "initialize" phase where we read in the h values.
-    let hx: Vec<_> = ctx.mr_slice(h_ptr, 8).into_iter().map(|h| *h as u32).collect();
+    let hx: Vec<_> = ctx.mr_slice_without_prot(h_ptr, 8).into_iter().map(|h| *h as u32).collect();
 
     ctx.bump_memory_clk();
 
@@ -46,11 +51,10 @@ pub(crate) unsafe fn sha256_compress(
     let mut g = hx[6];
     let mut h = hx[7];
 
-    let w_is: Vec<_> = ctx.mr_slice(w_ptr, 64).into_iter().map(|w| *w as u32).collect();
     for i in 0..64 {
         let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
         let ch = (e & f) ^ (!e & g);
-        let w_i = w_is[i];
+        let w_i = ctx.mr_without_prot(w_ptr + i as u64 * 8) as u32;
         original_w.push(w_i);
         let temp1 =
             h.wrapping_add(s1).wrapping_add(ch).wrapping_add(SHA_COMPRESS_K[i]).wrapping_add(w_i);
@@ -83,7 +87,7 @@ pub(crate) unsafe fn sha256_compress(
         g.wrapping_add(hx[6]) as u64,
         h.wrapping_add(hx[7]) as u64,
     ];
-    ctx.mw_slice(h_ptr, &v);
+    ctx.mw_slice_without_prot(h_ptr, &v);
 
-    None
+    Ok(None)
 }

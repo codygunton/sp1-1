@@ -13,6 +13,8 @@ use sp1_primitives::consts::{
     NOTE_UNTRUSTED_PROGRAM_ENABLED, PAGE_SIZE, STACK_TOP,
 };
 
+pub const TRAP_CONTEXT_SYMBOL: &str = "__SUCCINCT_TRAP_CONTEXT";
+
 /// RISC-V 64IM ELF (Executable and Linkable Format) File.
 use std::sync::Arc;
 /// RISC-V 32IM ELF (Executable and Linkable Format) File.
@@ -32,6 +34,8 @@ pub(crate) struct Elf {
     pub(crate) pc_start: u64,
     /// The base address of the program.
     pub(crate) pc_base: u64,
+    /// The trap context address of the program.
+    pub(crate) trap_context: Option<u64>,
     /// The initial page protection image, mapping page indices to protection flags.
     pub(crate) page_prot_image: HashMap<u64, u8>,
     /// The initial memory image, useful for global constants.
@@ -50,6 +54,7 @@ impl Elf {
         instructions: Vec<u32>,
         pc_start: u64,
         pc_base: u64,
+        trap_context: Option<u64>,
         memory_image: HashMap<u64, u64>,
         page_prot_image: HashMap<u64, u8>,
         function_symbols: Vec<(String, u64, u64)>,
@@ -59,6 +64,7 @@ impl Elf {
             instructions,
             pc_start,
             pc_base,
+            trap_context,
             memory_image: Arc::new(memory_image),
             page_prot_image,
             function_symbols,
@@ -104,6 +110,20 @@ impl Elf {
         if segments.len() > 256 {
             eyre::bail!("too many program headers");
         }
+
+        // Try fetching trap context address
+        let trap_context = elf
+            .symbol_table()?
+            .and_then(|(symbol_table, string_table)| {
+                symbol_table.iter().find(|symbol| {
+                    if let Ok(name) = string_table.get(symbol.st_name as usize) {
+                        name == TRAP_CONTEXT_SYMBOL
+                    } else {
+                        false
+                    }
+                })
+            })
+            .map(|symbol| symbol.st_value);
 
         let mut instructions: Vec<u32> = Vec::new();
         let mut base_address = None;
@@ -165,6 +185,7 @@ impl Elf {
             instructions,
             entry,
             base_address.unwrap(),
+            trap_context,
             image,
             page_prot_image,
             function_symbols,

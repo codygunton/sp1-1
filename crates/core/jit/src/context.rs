@@ -1,26 +1,64 @@
-use crate::{debug, MemValue, RiscRegister, TraceChunkHeader};
+use crate::{debug, Interrupt, MemValue, RiscRegister, TraceChunkHeader};
 use memmap2::{MmapMut, MmapOptions};
+use sp1_primitives::consts::{PROT_READ, PROT_WRITE};
 use std::{collections::VecDeque, io, os::fd::RawFd, ptr::NonNull, sync::mpsc};
 
 pub trait SyscallContext {
     /// Read a value from a register.
     fn rr(&self, reg: RiscRegister) -> u64;
+    /// Write a value to a register
+    fn rw(&mut self, reg: RiscRegister, value: u64);
+    /// Write next pc
+    fn set_next_pc(&mut self, pc: u64);
     /// Read a value from memory.
-    fn mr(&mut self, addr: u64) -> u64;
+    fn mr(&mut self, addr: u64) -> Result<u64, Interrupt>;
     fn mr_without_prot(&mut self, addr: u64) -> u64;
     /// Write a value to memory.
-    fn mw(&mut self, addr: u64, val: u64);
+    fn mw(&mut self, addr: u64, val: u64) -> Result<(), Interrupt>;
     fn mw_without_prot(&mut self, addr: u64, val: u64);
     /// Read a slice of values from memory.
-    fn mr_slice(&mut self, addr: u64, len: usize) -> impl IntoIterator<Item = &u64>;
+    fn mr_slice(
+        &mut self,
+        addr: u64,
+        len: usize,
+    ) -> Result<impl IntoIterator<Item = &u64>, Interrupt> {
+        self.prot_slice_check(addr, len, PROT_READ, true)?;
+        Ok(self.mr_slice_without_prot(addr, len))
+    }
+    /// Read a slice of values from memory, without checking page permissions
+    fn mr_slice_without_prot(&mut self, addr: u64, len: usize) -> impl IntoIterator<Item = &u64>;
     /// Read a slice of values from memory, without updating the memory clock
     /// Note that it still traces the access when tracing is enabled.
     fn mr_slice_unsafe(&mut self, addr: u64, len: usize) -> impl IntoIterator<Item = &u64>;
     /// Read a slice of values from memory, without updating the memory clock or tracing the access.
     fn mr_slice_no_trace(&mut self, addr: u64, len: usize) -> impl IntoIterator<Item = &u64>;
     /// Write a slice of values to memory.
-    fn mw_slice(&mut self, addr: u64, vals: &[u64]);
-    fn prot_slice_check(&mut self, addr: u64, len: usize, prot_bitmap: u8, update_clk: bool);
+    fn mw_slice(&mut self, addr: u64, vals: &[u64]) -> Result<(), Interrupt> {
+        self.prot_slice_check(addr, vals.len(), PROT_WRITE, true)?;
+        self.mw_slice_without_prot(addr, vals);
+        Ok(())
+    }
+    /// Write a slice of values to memory, without checking page permissions
+    fn mw_slice_without_prot(&mut self, addr: u64, vals: &[u64]);
+    #[inline]
+    fn read_slice_check(&mut self, addr: u64, len: usize) -> Result<(), Interrupt> {
+        self.prot_slice_check(addr, len, PROT_READ, true)
+    }
+    #[inline]
+    fn write_slice_check(&mut self, addr: u64, len: usize) -> Result<(), Interrupt> {
+        self.prot_slice_check(addr, len, PROT_WRITE, true)
+    }
+    #[inline]
+    fn read_write_slice_check(&mut self, addr: u64, len: usize) -> Result<(), Interrupt> {
+        self.prot_slice_check(addr, len, PROT_READ | PROT_WRITE, true)
+    }
+    fn prot_slice_check(
+        &mut self,
+        addr: u64,
+        len: usize,
+        prot_bitmap: u8,
+        update_clk: bool,
+    ) -> Result<(), Interrupt>;
     fn page_prot_write(&mut self, addr: u64, val: u8);
     /// Get the input buffer
     fn input_buffer(&mut self) -> &mut VecDeque<Vec<u8>>;
@@ -74,23 +112,34 @@ impl SyscallContext for JitContext {
         self.registers[reg as usize]
     }
 
-    fn mr(&mut self, addr: u64) -> u64 {
-        unsafe { ContextMemory::new(self).mr(addr) }
+    fn rw(&mut self, _reg: RiscRegister, _value: u64) {
+        unimplemented!()
+    }
+
+    fn set_next_pc(&mut self, _pc: u64) {
+        unimplemented!()
+    }
+
+    fn mr(&mut self, addr: u64) -> Result<u64, Interrupt> {
+        // TODO: page permissions
+        Ok(self.mr_without_prot(addr))
     }
 
     fn mr_without_prot(&mut self, addr: u64) -> u64 {
-        self.mr(addr)
+        unsafe { ContextMemory::new(self).mr(addr) }
     }
 
-    fn mw(&mut self, addr: u64, val: u64) {
-        unsafe { ContextMemory::new(self).mw(addr, val) };
+    fn mw(&mut self, addr: u64, val: u64) -> Result<(), Interrupt> {
+        // TODO: page permissions
+        self.mw_without_prot(addr, val);
+        Ok(())
     }
 
     fn mw_without_prot(&mut self, addr: u64, val: u64) {
-        self.mw(addr, val)
+        unsafe { ContextMemory::new(self).mw(addr, val) };
     }
 
-    fn mr_slice(&mut self, addr: u64, len: usize) -> impl IntoIterator<Item = &u64> {
+    fn mr_slice_without_prot(&mut self, addr: u64, len: usize) -> impl IntoIterator<Item = &u64> {
         debug_assert!(addr.is_multiple_of(8), "Address {addr} is not aligned to 8");
 
         // Convert the byte address to the word address.
@@ -156,7 +205,7 @@ impl SyscallContext for JitContext {
         slice.iter().map(|val| &val.value)
     }
 
-    fn mw_slice(&mut self, addr: u64, vals: &[u64]) {
+    fn mw_slice_without_prot(&mut self, addr: u64, vals: &[u64]) {
         unsafe { ContextMemory::new(self).mw_slice(addr, vals) };
     }
 
@@ -164,7 +213,13 @@ impl SyscallContext for JitContext {
         unimplemented!()
     }
 
-    fn prot_slice_check(&mut self, _addr: u64, _len: usize, _prot_bitmap: u8, _update_clk: bool) {
+    fn prot_slice_check(
+        &mut self,
+        _addr: u64,
+        _len: usize,
+        _prot_bitmap: u8,
+        _update_clk: bool,
+    ) -> Result<(), Interrupt> {
         unimplemented!()
     }
 

@@ -4,10 +4,14 @@
 
 use sp1_jit::{
     debug::{self, DebugState},
-    MemValue, PageProtValue, RiscRegister, SyscallContext, TraceChunkHeader, TraceChunkRaw,
+    Interrupt, MemValue, PageProtValue, RiscRegister, SyscallContext, TraceChunkHeader,
+    TraceChunkRaw,
 };
 
-use sp1_primitives::consts::{PAGE_SIZE, PROT_EXEC, PROT_READ, PROT_WRITE};
+use sp1_primitives::consts::{
+    PAGE_SIZE, PROT_EXEC, PROT_FAILURE_EXEC, PROT_FAILURE_READ, PROT_FAILURE_WRITE, PROT_READ,
+    PROT_WRITE,
+};
 
 use std::{
     collections::VecDeque,
@@ -52,6 +56,8 @@ pub struct MinimalExecutor {
     debug_sender: Option<mpsc::SyncSender<Option<debug::State>>>,
     transpiler: InstructionTranspiler,
     decoded_instruction_cache: HashMap<u32, Instruction>,
+    next_pc: u64,
+    next_clk: u64,
     #[cfg(feature = "profiling")]
     profiler: Option<(crate::profiler::Profiler, std::io::BufWriter<std::fs::File>)>,
     /// Cycle tracker start times and depths, keyed by label name.
@@ -80,7 +86,15 @@ impl SyscallContext for MinimalExecutor {
         self.registers[reg as usize]
     }
 
-    fn mr(&mut self, addr: u64) -> u64 {
+    fn rw(&mut self, reg: RiscRegister, value: u64) {
+        self.registers[reg as usize] = value;
+    }
+
+    fn set_next_pc(&mut self, pc: u64) {
+        self.next_pc = pc;
+    }
+
+    fn mr(&mut self, addr: u64) -> Result<u64, Interrupt> {
         self.mr(addr, PROT_READ, None)
     }
 
@@ -88,21 +102,25 @@ impl SyscallContext for MinimalExecutor {
         self.mr_without_prot(addr, None)
     }
 
-    fn mw(&mut self, addr: u64, val: u64) {
-        self.mw(addr, val, true, true, None);
+    fn mw(&mut self, addr: u64, val: u64) -> Result<(), Interrupt> {
+        self.mw(addr, val, true, true, None)
     }
 
     fn mw_without_prot(&mut self, addr: u64, val: u64) {
-        self.mw(addr, val, true, false, None);
+        self.mw(addr, val, true, false, None).unwrap()
     }
 
-    fn prot_slice_check(&mut self, addr: u64, len: usize, prot_bitmap: u8, update_clk: bool) {
-        self.prot_slice_check(addr, len, prot_bitmap, update_clk);
+    fn prot_slice_check(
+        &mut self,
+        addr: u64,
+        len: usize,
+        prot_bitmap: u8,
+        update_clk: bool,
+    ) -> Result<(), Interrupt> {
+        self.prot_slice_check(addr, len, prot_bitmap, update_clk)
     }
 
-    fn mr_slice(&mut self, addr: u64, len: usize) -> impl IntoIterator<Item = &u64> {
-        self.prot_slice_check(addr, len, PROT_READ, true);
-
+    fn mr_slice_without_prot(&mut self, addr: u64, len: usize) -> impl IntoIterator<Item = &u64> {
         for i in 0..len as u64 {
             let mem_value = self.memory.entry(addr + i * 8).or_default();
             if self.traces.is_some() {
@@ -141,11 +159,9 @@ impl SyscallContext for MinimalExecutor {
             .map(|addr| self.memory.get(addr).map_or(&0, |v| &v.value))
     }
 
-    fn mw_slice(&mut self, addr: u64, vals: &[u64]) {
-        self.prot_slice_check(addr, vals.len(), PROT_WRITE, true);
-
+    fn mw_slice_without_prot(&mut self, addr: u64, vals: &[u64]) {
         for (i, val) in vals.iter().enumerate() {
-            self.mw(addr + 8 * i as u64, *val, true, false, None);
+            self.mw(addr + 8 * i as u64, *val, true, false, None).unwrap();
         }
     }
 
@@ -291,6 +307,8 @@ impl MinimalExecutor {
             exit_code: 0,
             transpiler: InstructionTranspiler,
             decoded_instruction_cache: HashMap::new(),
+            next_pc: pc,
+            next_clk: 1,
             #[cfg(feature = "profiling")]
             profiler: None,
             #[cfg(feature = "profiling")]
@@ -552,9 +570,9 @@ impl MinimalExecutor {
     }
 
     #[inline]
-    fn fetch(&mut self) -> Option<Instruction> {
+    fn fetch(&mut self) -> Result<Option<Instruction>, Interrupt> {
         let instruction = self.program.fetch(self.pc);
-        if let Some(instruction) = instruction {
+        Ok(if let Some(instruction) = instruction {
             Some(*instruction)
         } else if self.program.enable_untrusted_programs {
             let aligned_pc = self.pc & !0b111;
@@ -562,7 +580,7 @@ impl MinimalExecutor {
                 aligned_pc,
                 PROT_READ | PROT_EXEC,
                 Some(MemoryAccessPosition::UntrustedInstruction),
-            );
+            )?;
 
             let aligned_offset = self.pc - aligned_pc;
             assert!(
@@ -586,11 +604,10 @@ impl MinimalExecutor {
             Some(instruction)
         } else {
             None
-        }
+        })
     }
 
     fn execute_instruction(&mut self) -> bool {
-        let instruction = self.fetch().unwrap();
         if let Some(sender) = &self.debug_sender {
             sender.send(Some(self.current_state())).expect("Failed to send debug state");
         }
@@ -601,29 +618,52 @@ impl MinimalExecutor {
             }
         }
 
-        let mut next_pc = self.pc.wrapping_add(PC_INC);
-        let mut next_clk = self.clk.wrapping_add(CLK_INC);
-        if instruction.is_alu_instruction() {
-            self.execute_alu(&instruction);
-        } else if instruction.is_memory_load_instruction() {
-            self.execute_load(&instruction);
-        } else if instruction.is_memory_store_instruction() {
-            self.execute_store(&instruction);
-        } else if instruction.is_branch_instruction() {
-            self.execute_branch(&instruction, &mut next_pc);
-        } else if instruction.is_jump_instruction() {
-            self.execute_jump(&instruction, &mut next_pc);
-        } else if instruction.is_utype_instruction() {
-            self.execute_utype(&instruction);
-        } else if instruction.is_ecall_instruction() {
-            self.execute_ecall(&instruction, &mut next_pc, &mut next_clk);
-        } else {
-            unreachable!("Invalid opcode for `execute_instruction`: {:?}", instruction.opcode)
+        let mut interrupt = None;
+        self.next_pc = self.pc.wrapping_add(PC_INC);
+        self.next_clk = self.clk.wrapping_add(CLK_INC);
+
+        match self.fetch() {
+            Ok(None) => panic!("Unable to fetch instruction, pc=0x{:x}", self.pc),
+            Ok(Some(instruction)) => {
+                if instruction.is_alu_instruction() {
+                    self.execute_alu(&instruction);
+                } else if instruction.is_memory_load_instruction() {
+                    if let Err(i) = self.execute_load(&instruction) {
+                        interrupt = Some(i);
+                    };
+                } else if instruction.is_memory_store_instruction() {
+                    if let Err(i) = self.execute_store(&instruction) {
+                        interrupt = Some(i);
+                    }
+                } else if instruction.is_branch_instruction() {
+                    self.execute_branch(&instruction);
+                } else if instruction.is_jump_instruction() {
+                    self.execute_jump(&instruction);
+                } else if instruction.is_utype_instruction() {
+                    self.execute_utype(&instruction);
+                } else if instruction.is_ecall_instruction() {
+                    if let Err(i) = self.execute_ecall(&instruction) {
+                        interrupt = Some(i);
+                    }
+                } else {
+                    unreachable!(
+                        "Invalid opcode for `execute_instruction`: {:?}",
+                        instruction.opcode
+                    )
+                }
+            }
+            Err(i) => {
+                interrupt = Some(i);
+            }
+        }
+
+        if let Some(interrupt) = interrupt {
+            self.handle_interrupt(interrupt);
         }
 
         self.registers[0] = 0;
-        self.pc = next_pc;
-        self.clk = next_clk;
+        self.pc = self.next_pc;
+        self.clk = self.next_clk;
         if self.maybe_unconstrained.is_none() {
             self.global_clk = self.global_clk.wrapping_add(1);
         }
@@ -638,13 +678,21 @@ impl MinimalExecutor {
 
     /// `prot_slice_check` only issues one page permission check per page touched
     #[inline]
-    fn prot_slice_check(&mut self, addr: u64, len: usize, prot_bitmap: u8, update_clk: bool) {
+    fn prot_slice_check(
+        &mut self,
+        addr: u64,
+        len: usize,
+        prot_bitmap: u8,
+        update_clk: bool,
+    ) -> Result<(), Interrupt> {
         let first_page_idx = addr / (PAGE_SIZE as u64);
         let last_page_idx = (addr + (len - 1) as u64 * 8) / (PAGE_SIZE as u64);
 
         for page_idx in first_page_idx..=last_page_idx {
-            self.prot_check(page_idx * (PAGE_SIZE as u64), prot_bitmap, update_clk, None);
+            self.prot_check(page_idx * (PAGE_SIZE as u64), prot_bitmap, update_clk, None)?;
         }
+
+        Ok(())
     }
 
     #[inline]
@@ -654,11 +702,20 @@ impl MinimalExecutor {
         prot_bitmap: u8,
         update_clk: bool,
         position: Option<MemoryAccessPosition>,
-    ) {
+    ) -> Result<(), Interrupt> {
         if self.program.enable_untrusted_programs {
             let prot = self.pr(addr, update_clk, position);
-            assert!(prot & prot_bitmap == prot_bitmap);
+            if (prot_bitmap & PROT_EXEC) != 0 && (prot & PROT_EXEC) == 0 {
+                return Err(Interrupt { code: PROT_FAILURE_EXEC });
+            }
+            if (prot_bitmap & PROT_READ) != 0 && (prot & PROT_READ) == 0 {
+                return Err(Interrupt { code: PROT_FAILURE_READ });
+            }
+            if (prot_bitmap & PROT_WRITE) != 0 && (prot & PROT_WRITE) == 0 {
+                return Err(Interrupt { code: PROT_FAILURE_WRITE });
+            }
         }
+        Ok(())
     }
 
     /// Modeled just like rr and mr, pr stands for "permission reading" in this case
@@ -686,9 +743,9 @@ impl MinimalExecutor {
         aligned_addr: u64,
         page_prot_bitmap: u8,
         position: Option<MemoryAccessPosition>,
-    ) -> u64 {
-        self.prot_check(aligned_addr, page_prot_bitmap, true, position);
-        self.mr_without_prot(aligned_addr, position)
+    ) -> Result<u64, Interrupt> {
+        self.prot_check(aligned_addr, page_prot_bitmap, true, position)?;
+        Ok(self.mr_without_prot(aligned_addr, position))
     }
 
     #[inline]
@@ -717,9 +774,9 @@ impl MinimalExecutor {
         push_new_value: bool,
         check_page_prot: bool,
         position: Option<MemoryAccessPosition>,
-    ) {
+    ) -> Result<(), Interrupt> {
         if check_page_prot {
-            self.prot_check(aligned_addr, PROT_WRITE, true, position);
+            self.prot_check(aligned_addr, PROT_WRITE, true, position)?;
         }
 
         let mem_value = self.memory.entry(aligned_addr).or_default();
@@ -736,17 +793,35 @@ impl MinimalExecutor {
                 self.traces.as_mut().unwrap_unchecked().extend(&[*mem_value]);
             }
         }
+        Ok(())
+    }
+
+    /// Handle an interrupt
+    fn handle_interrupt(&mut self, interrupt: Interrupt) {
+        // To avoid recusion, memory page permission is completely ignored in trap handling.
+        // Here we just assume we can write to the target address, and read from the source
+        // address without any issues. If you think about it, in modern OSes it's quite likely
+        // that interrupt handler directly work with physical memory, ignoring all MMU rules.
+        if let Some(trap_context_address) = self.program.trap_context {
+            self.next_pc = self.mr_without_prot(trap_context_address, None);
+            self.mw_without_prot(trap_context_address + 8, interrupt.code);
+            self.mw_without_prot(trap_context_address + 16, self.pc);
+        } else {
+            // When trap PC is not available, we preserve current behavior: SP1 simply halts.
+            panic!("A memory permission failure happens at pc=0x{:x}", self.pc);
+        }
+        // QUESTION(min): in case of interrupt, do we need to bump clock by 256 like an ecall?
     }
 
     /// Execute a load instruction.
     #[inline]
-    fn execute_load(&mut self, instruction: &Instruction) {
+    fn execute_load(&mut self, instruction: &Instruction) -> Result<(), Interrupt> {
         let (rd, rs1, imm_offset) = instruction.i_type();
         let base = self.registers[rs1 as usize];
         let addr = base.wrapping_add(imm_offset);
         let aligned_addr = addr & !0b111;
 
-        let value = self.mr(aligned_addr, PROT_READ, Some(MemoryAccessPosition::Memory));
+        let value = self.mr(aligned_addr, PROT_READ, Some(MemoryAccessPosition::Memory))?;
 
         self.registers[rd as usize] = match instruction.opcode {
             Opcode::LB => ((value >> ((addr % 8) * 8)) & 0xFF) as i8 as i64 as u64,
@@ -789,11 +864,13 @@ impl MinimalExecutor {
             }
             _ => unreachable!("Invalid opcode for `execute_load`: {:?}", instruction.opcode),
         };
+
+        Ok(())
     }
 
     /// When we store, we need to track the previous value at the address
     #[inline]
-    fn execute_store(&mut self, instruction: &Instruction) {
+    fn execute_store(&mut self, instruction: &Instruction) -> Result<(), Interrupt> {
         let (rs1, rs2, imm_offset) = instruction.s_type();
         let src = self.registers[rs1 as usize];
         let base = self.registers[rs2 as usize];
@@ -825,7 +902,7 @@ impl MinimalExecutor {
             _ => unreachable!(),
         };
 
-        self.mw(aligned_addr, value, false, true, Some(MemoryAccessPosition::Memory));
+        self.mw(aligned_addr, value, false, true, Some(MemoryAccessPosition::Memory))
     }
 
     /// Execute an ALU instruction.
@@ -941,13 +1018,13 @@ impl MinimalExecutor {
     }
 
     /// Execute a jump instruction.
-    fn execute_jump(&mut self, instruction: &Instruction, next_pc: &mut u64) {
+    fn execute_jump(&mut self, instruction: &Instruction) {
         match instruction.opcode {
             Opcode::JAL => {
                 let (rd, imm_offset) = instruction.j_type();
                 let imm_offset_se = sign_extend_imm(imm_offset, 21);
                 let pc = self.pc;
-                *next_pc = ((pc as i64).wrapping_add(imm_offset_se)) as u64;
+                self.next_pc = ((pc as i64).wrapping_add(imm_offset_se)) as u64;
                 self.registers[rd as usize] = pc.wrapping_add(4);
             }
             Opcode::JALR => {
@@ -957,14 +1034,14 @@ impl MinimalExecutor {
                 let imm_offset_se = sign_extend_imm(imm_offset, 12);
                 self.registers[rd as usize] = self.pc.wrapping_add(PC_INC);
                 // Calculate next PC: (rs1 + imm) & ~1
-                *next_pc = (base.wrapping_add(imm_offset_se) as u64) & !1_u64;
+                self.next_pc = (base.wrapping_add(imm_offset_se) as u64) & !1_u64;
             }
             _ => unreachable!("Invalid opcode for `execute_jump`: {:?}", instruction.opcode),
         }
     }
 
     /// Execute a branch instruction.
-    fn execute_branch(&mut self, instruction: &Instruction, next_pc: &mut u64) {
+    fn execute_branch(&mut self, instruction: &Instruction) {
         let (rs1, rs2, imm_offset) = instruction.b_type();
         let a = self.registers[rs1 as usize];
         let b = self.registers[rs2 as usize];
@@ -980,7 +1057,7 @@ impl MinimalExecutor {
             }
         };
         if branch {
-            *next_pc = self.pc.wrapping_add(imm_offset);
+            self.next_pc = self.pc.wrapping_add(imm_offset);
         }
     }
 
@@ -997,13 +1074,13 @@ impl MinimalExecutor {
 
     #[inline]
     /// Execute an ecall instruction.
-    fn execute_ecall(&mut self, instruction: &Instruction, next_pc: &mut u64, next_clk: &mut u64) {
+    fn execute_ecall(&mut self, instruction: &Instruction) -> Result<(), Interrupt> {
         let opcode = instruction.opcode;
         assert!(instruction.is_ecall_instruction(), "Invalid ecall opcode: {opcode:?}");
 
         let code = SyscallCode::from_u32(self.registers[Register::X5 as usize] as u32);
 
-        self.registers[Register::X5 as usize] = ecall_handler(self, code);
+        self.registers[Register::X5 as usize] = ecall_handler(self, code)?;
 
         // Handle special cases for syscalls.
         match code {
@@ -1011,20 +1088,21 @@ impl MinimalExecutor {
             SyscallCode::EXIT_UNCONSTRAINED => {
                 // The `exit_unconstrained` resets the pc and clk to the values they were at when
                 // the unconstrained block was entered.
-                *next_pc = self.pc.wrapping_add(PC_INC);
-                *next_clk = self.clk.wrapping_add(CLK_INC + 256);
+                self.next_pc = self.pc.wrapping_add(PC_INC);
+                self.next_clk = self.clk.wrapping_add(CLK_INC + 256);
             }
             SyscallCode::HALT => {
                 // Explicity set the PC to one, to indicate that the program has halted.
-                *next_pc = HALT_PC;
-                *next_clk = next_clk.wrapping_add(256);
+                self.next_pc = HALT_PC;
+                self.next_clk = self.next_clk.wrapping_add(256);
             }
             _ => {
                 // In the normal case, we just want to advance to the next instruction, which has
                 // already been done by the ecall handler.
-                *next_clk = next_clk.wrapping_add(256);
+                self.next_clk = self.next_clk.wrapping_add(256);
             }
         }
+        Ok(())
     }
 
     fn mem_read_untracked(&self, addr: u64) -> u64 {

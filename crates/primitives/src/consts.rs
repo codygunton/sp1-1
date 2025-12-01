@@ -34,6 +34,11 @@ pub const PROT_WRITE: u8 = PF_W as u8;
 pub const PROT_EXEC: u8 = PF_X as u8;
 pub const DEFAULT_PAGE_PROT: u8 = PROT_READ | PROT_WRITE;
 
+/// The values here are chosen based on RISC-V's specifications.
+pub const PROT_FAILURE_EXEC: u64 = 1;
+pub const PROT_FAILURE_READ: u64 = 5;
+pub const PROT_FAILURE_WRITE: u64 = 7;
+
 /// The type for the ELF note for enabling untrusted programs.
 pub const NOTE_UNTRUSTED_PROGRAM_ENABLED: u32 = 1;
 /// The ELF note header for untrusted programs. It can serve as a version field
