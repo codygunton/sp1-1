@@ -3,7 +3,7 @@ use sp1_primitives::consts::{LOG_PAGE_SIZE, PROT_READ, PROT_WRITE};
 use crate::{
     events::{PrecompileEvent, ShaExtendEvent, ShaExtendMemoryRecords, ShaExtendPageProtRecords},
     vm::syscall::SyscallRuntime,
-    SyscallCode,
+    ExecutionError, SyscallCode,
 };
 
 pub(crate) fn sha256_extend<'a, RT: SyscallRuntime<'a>>(
@@ -11,7 +11,7 @@ pub(crate) fn sha256_extend<'a, RT: SyscallRuntime<'a>>(
     syscall_code: SyscallCode,
     arg1: u64,
     arg2: u64,
-) -> Option<u64> {
+) -> Result<Option<u64>, ExecutionError> {
     let w_ptr = arg1;
     assert!(arg2 == 0, "arg2 must be 0");
     assert!(arg1.is_multiple_of(8));
@@ -21,13 +21,13 @@ pub(crate) fn sha256_extend<'a, RT: SyscallRuntime<'a>>(
         w_ptr >> LOG_PAGE_SIZE,
         (w_ptr + 15 * 8) >> LOG_PAGE_SIZE,
         PROT_READ,
-    );
+    )?;
     rt.increment_clk();
     let extension_page_prot_records = rt.page_prot_range_check(
         (w_ptr + 16 * 8) >> LOG_PAGE_SIZE,
         (w_ptr + 63 * 8) >> LOG_PAGE_SIZE,
         PROT_READ | PROT_WRITE,
-    );
+    )?;
 
     let mut sha_extend_memory_records = Vec::with_capacity(48);
     for i in 16..64 {
@@ -85,5 +85,5 @@ pub(crate) fn sha256_extend<'a, RT: SyscallRuntime<'a>>(
         rt.add_precompile_event(syscall_code, syscall_event, event);
     }
 
-    None
+    Ok(None)
 }

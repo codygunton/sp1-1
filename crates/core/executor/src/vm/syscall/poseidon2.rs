@@ -1,7 +1,7 @@
 use crate::{
     events::{Poseidon2PrecompileEvent, PrecompileEvent},
     vm::syscall::SyscallRuntime,
-    SyscallCode,
+    ExecutionError, SyscallCode,
 };
 
 pub(crate) fn poseidon2<'a, RT: SyscallRuntime<'a>>(
@@ -9,7 +9,7 @@ pub(crate) fn poseidon2<'a, RT: SyscallRuntime<'a>>(
     syscall_code: SyscallCode,
     arg1: u64,
     arg2: u64,
-) -> Option<u64> {
+) -> Result<Option<u64>, ExecutionError> {
     assert!(arg2 == 0, "arg2 must be 0");
     assert!(arg1.is_multiple_of(8));
 
@@ -17,11 +17,13 @@ pub(crate) fn poseidon2<'a, RT: SyscallRuntime<'a>>(
 
     let ptr = arg1;
 
+    let output_page_prot_records = rt.read_write_slice_check(ptr, 8)?;
+
     // Read the input values using unsafe read (since we'll overwrite them)
     let _ = rt.mr_slice_unsafe(8);
 
     // Write the computed results from memory records
-    let (output_memory_records, output_page_prot_records) = rt.mw_slice(ptr, 8);
+    let output_memory_records = rt.mw_slice_without_prot(ptr, 8);
 
     if RT::TRACING {
         let (local_mem_access, local_page_prot_access) = rt.postprocess_precompile();
@@ -49,5 +51,5 @@ pub(crate) fn poseidon2<'a, RT: SyscallRuntime<'a>>(
         rt.add_precompile_event(syscall_code, syscall_event, event);
     }
 
-    None
+    Ok(None)
 }

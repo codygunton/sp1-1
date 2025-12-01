@@ -1,7 +1,7 @@
 use crate::{
     events::{PrecompileEvent, U256xU2048MulEvent, U256xU2048MulPageProtRecords},
     vm::syscall::SyscallRuntime,
-    SyscallCode,
+    ExecutionError, SyscallCode,
 };
 
 const U256_NUM_WORDS: usize = 4;
@@ -12,7 +12,7 @@ pub(crate) fn u256xu2048_mul<'a, RT: SyscallRuntime<'a>>(
     syscall_code: SyscallCode,
     arg1: u64,
     arg2: u64,
-) -> Option<u64> {
+) -> Result<Option<u64>, ExecutionError> {
     let clk = rt.core().clk();
 
     let a_ptr = arg1;
@@ -24,25 +24,31 @@ pub(crate) fn u256xu2048_mul<'a, RT: SyscallRuntime<'a>>(
     let lo_ptr = lo_ptr_memory.value;
     let hi_ptr = hi_ptr_memory.value;
 
+    let a_page_prot_records = rt.read_slice_check(a_ptr, U256_NUM_WORDS)?;
+    let b_page_prot_records = rt.read_slice_check(b_ptr, U2048_NUM_WORDS)?;
+    rt.increment_clk();
+    let lo_page_prot_records = rt.write_slice_check(lo_ptr, U2048_NUM_WORDS)?;
+    let hi_page_prot_records = rt.write_slice_check(hi_ptr, U256_NUM_WORDS)?;
+
     // Read input values from memory records
-    let (a_memory_records, a_page_prot_records) = rt.mr_slice(a_ptr, U256_NUM_WORDS);
+    let a_memory_records = rt.mr_slice_without_prot(a_ptr, U256_NUM_WORDS);
     let a: Vec<_> = a_memory_records.iter().map(|record| record.value).collect();
 
     rt.increment_clk();
 
-    let (b_memory_records, b_page_prot_records) = rt.mr_slice(b_ptr, U2048_NUM_WORDS);
+    let b_memory_records = rt.mr_slice_without_prot(b_ptr, U2048_NUM_WORDS);
     let b: Vec<_> = b_memory_records.iter().map(|record| record.value).collect();
 
     // Increment clk so that the write is not at the same cycle as the read
     rt.increment_clk();
 
     // Read the computed results from memory records using mw_slice
-    let (lo_memory_records, lo_page_prot_records) = rt.mw_slice(lo_ptr, U2048_NUM_WORDS);
+    let lo_memory_records = rt.mw_slice_without_prot(lo_ptr, U2048_NUM_WORDS);
     let lo: Vec<_> = lo_memory_records.iter().map(|record| record.value).collect();
 
     rt.increment_clk();
 
-    let (hi_memory_records, hi_page_prot_records) = rt.mw_slice(hi_ptr, U256_NUM_WORDS);
+    let hi_memory_records = rt.mw_slice_without_prot(hi_ptr, U256_NUM_WORDS);
     let hi: Vec<_> = hi_memory_records.iter().map(|record| record.value).collect();
 
     if RT::TRACING {
@@ -88,5 +94,5 @@ pub(crate) fn u256xu2048_mul<'a, RT: SyscallRuntime<'a>>(
         rt.add_precompile_event(syscall_code, syscall_event, event);
     }
 
-    None
+    Ok(None)
 }

@@ -466,3 +466,11 @@ impl<'a> MemoryView<'a> {
         unsafe { std::ptr::read(entry_ptr.add(word_address as usize)) }
     }
 }
+
+/// A RISC-V interrupt, right now we are only doing trap with this
+/// structure but it might be expanded later.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Interrupt {
+    /// Trap code
+    pub code: u64,
+}

@@ -8,7 +8,7 @@ use crate::{
         gas::ReportGenerator,
         results::{
             AluResult, BranchResult, CycleResult, FetchResult, JumpResult, LoadResult,
-            MaybeImmediate, StoreResult, UTypeResult,
+            MaybeImmediate, StoreResult, TrapResult, UTypeResult,
         },
         syscall::SyscallRuntime,
         CoreVM,
@@ -44,8 +44,11 @@ impl GasEstimatingVM<'_> {
         }
     }
 
-    /// Execute the next instruction at the current PC.
-    pub fn execute_instruction(&mut self) -> Result<CycleResult, ExecutionError> {
+    /// Execute the next instruction at the current PC, thie method only
+    /// executes the instruction, returns error if there is any. It does not
+    /// advance the cycle, giving the outer environment a chance to handle
+    /// certain errors (such as traps).
+    fn execute_instruction_inner(&mut self) -> Result<(), ExecutionError> {
         let FetchResult { instruction, .. } = self.core.fetch()?;
         if instruction.is_none() {
             unreachable!("Fetching the next instruction failed");
@@ -111,6 +114,15 @@ impl GasEstimatingVM<'_> {
             }
         }
 
+        Ok(())
+    }
+
+    /// Execute the next instruction at the current PC.
+    pub fn execute_instruction(&mut self) -> Result<CycleResult, ExecutionError> {
+        if let Err(e) = self.execute_instruction_inner() {
+            self.handle_error(e)?;
+        }
+
         Ok(self.core.advance())
     }
 }
@@ -128,6 +140,19 @@ impl<'a> GasEstimatingVM<'a> {
             hint_lens_idx: 0,
             gas_calculator: ReportGenerator::new(trace.clk_start()),
         }
+    }
+
+    /// Handles recoverable errors such as traps
+    pub fn handle_error(&mut self, e: ExecutionError) -> Result<(), ExecutionError> {
+        let TrapResult { context, code_record, pc_record, handler_record } =
+            self.core.handle_error(e)?;
+
+        // QUESTION(min): are those enough?
+        self.gas_calculator.handle_mem_event(context, handler_record.prev_timestamp);
+        self.gas_calculator.handle_mem_event(context + 8, code_record.prev_timestamp);
+        self.gas_calculator.handle_mem_event(context + 16, pc_record.prev_timestamp);
+
+        Ok(())
     }
 
     /// Execute a load instruction.
@@ -297,32 +322,40 @@ impl<'a> SyscallRuntime<'a> for GasEstimatingVM<'a> {
         &mut self.core
     }
 
-    fn mr(&mut self, addr: u64) -> MemoryReadRecord {
-        let record = SyscallRuntime::mr(self.core_mut(), addr);
+    fn mr(&mut self, addr: u64) -> Result<MemoryReadRecord, ExecutionError> {
+        let record = SyscallRuntime::mr(self.core_mut(), addr)?;
 
         self.gas_calculator.handle_mem_event(addr, record.prev_timestamp);
 
-        record
+        Ok(record)
     }
 
-    fn mw_slice(&mut self, addr: u64, len: usize) -> (Vec<MemoryWriteRecord>, Vec<PageProtRecord>) {
-        let (records, prot_records) = SyscallRuntime::mw_slice(self.core_mut(), addr, len);
+    fn mw_slice(
+        &mut self,
+        addr: u64,
+        len: usize,
+    ) -> Result<(Vec<MemoryWriteRecord>, Vec<PageProtRecord>), ExecutionError> {
+        let (records, prot_records) = SyscallRuntime::mw_slice(self.core_mut(), addr, len)?;
 
         for (i, record) in records.iter().enumerate() {
             self.gas_calculator.handle_mem_event(addr + i as u64 * 8, record.prev_timestamp);
         }
 
-        (records, prot_records)
+        Ok((records, prot_records))
     }
 
-    fn mr_slice(&mut self, addr: u64, len: usize) -> (Vec<MemoryReadRecord>, Vec<PageProtRecord>) {
-        let (records, prot_records) = SyscallRuntime::mr_slice(self.core_mut(), addr, len);
+    fn mr_slice(
+        &mut self,
+        addr: u64,
+        len: usize,
+    ) -> Result<(Vec<MemoryReadRecord>, Vec<PageProtRecord>), ExecutionError> {
+        let (records, prot_records) = SyscallRuntime::mr_slice(self.core_mut(), addr, len)?;
 
         for (i, record) in records.iter().enumerate() {
             self.gas_calculator.handle_mem_event(addr + i as u64 * 8, record.prev_timestamp);
         }
 
-        (records, prot_records)
+        Ok((records, prot_records))
     }
 
     fn rr(&mut self, register: usize) -> MemoryReadRecord {
@@ -333,11 +366,11 @@ impl<'a> SyscallRuntime<'a> for GasEstimatingVM<'a> {
         record
     }
 
-    fn mw(&mut self, addr: u64) -> MemoryWriteRecord {
-        let record = SyscallRuntime::mw(self.core_mut(), addr);
+    fn mw(&mut self, addr: u64) -> Result<MemoryWriteRecord, ExecutionError> {
+        let record = SyscallRuntime::mw(self.core_mut(), addr)?;
 
         self.gas_calculator.handle_mem_event(addr, record.prev_timestamp);
 
-        record
+        Ok(record)
     }
 }

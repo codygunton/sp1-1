@@ -56,6 +56,10 @@ pub enum ExecutionError {
     #[error("Running executor in non-sharding state, but got a shard boundary or trace end")]
     InvalidShardingState(),
 
+    /// Page permission check fails
+    #[error("Page permission violation error, code: {0}")]
+    PagePermissionViolation(u64),
+
     /// A generic error.
     #[error("{0}")]
     Other(String),

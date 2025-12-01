@@ -15,8 +15,9 @@ use sp1_core_machine::syscall::precompiles::weierstrass::{
 };
 use sp1_core_machine::utils::limbs_to_words;
 use sp1_core_machine::{
-    riscv::{KeccakPermuteChip, RiscvAir}, TrustMode,
+    riscv::{KeccakPermuteChip, RiscvAir},
     syscall::precompiles::keccak256::{columns::KeccakMemCols, constants::rc_value_bit},
+    TrustMode,
 };
 use sp1_curves::k256::elliptic_curve::generic_array::typenum::Unsigned;
 use sp1_curves::params::FieldParameters;

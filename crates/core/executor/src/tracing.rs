@@ -72,8 +72,11 @@ impl TracingVM<'_> {
         }
     }
 
-    /// Execute the next instruction at the current PC.
-    pub fn execute_instruction(&mut self) -> Result<CycleResult, ExecutionError> {
+    /// Execute the next instruction at the current PC, thie method only
+    /// executes the instruction, returns error if there is any. It does not
+    /// advance the cycle, giving the outer environment a chance to handle
+    /// certain errors (such as traps).
+    fn execute_instruction_inner(&mut self) -> Result<(), ExecutionError> {
         let FetchResult { instruction, mr_record, pc } = self.core.fetch()?;
         if instruction.is_none() {
             unreachable!("Fetching the next instruction failed");
@@ -137,6 +140,15 @@ impl TracingVM<'_> {
             Opcode::EBREAK | Opcode::UNIMP => {
                 unreachable!("Invalid opcode for `execute_instruction`: {:?}", instruction.opcode)
             }
+        }
+
+        Ok(())
+    }
+
+    /// Execute the next instruction at the current PC.
+    pub fn execute_instruction(&mut self) -> Result<CycleResult, ExecutionError> {
+        if let Err(e) = self.execute_instruction_inner() {
+            self.handle_error(e)?;
         }
 
         Ok(self.core.advance())
@@ -225,6 +237,15 @@ impl<'a> TracingVM<'a> {
     #[must_use]
     pub fn public_values(&self) -> &PublicValues<u32, u64, u64, u32> {
         &self.record.public_values
+    }
+
+    /// Handles recoverable errors such as traps
+    pub fn handle_error(&mut self, e: ExecutionError) -> Result<(), ExecutionError> {
+        // QUESTION(min): handle TrapResult, this is getting slightly more
+        // complicated so I will just leave it here.
+        let _ = self.core.handle_error(e);
+
+        Ok(())
     }
 
     /// Execute a load instruction.
@@ -997,8 +1018,8 @@ impl<'a> SyscallRuntime<'a> for TracingVM<'a> {
         record
     }
 
-    fn mr(&mut self, addr: u64) -> MemoryReadRecord {
-        let record = SyscallRuntime::mr(self.core_mut(), addr);
+    fn mr(&mut self, addr: u64) -> Result<MemoryReadRecord, ExecutionError> {
+        let record = SyscallRuntime::mr(self.core_mut(), addr)?;
 
         if let Some(local_memory_access) = &mut self.precompile_local_memory_access {
             local_memory_access.insert_record(addr, record);
@@ -1023,7 +1044,7 @@ impl<'a> SyscallRuntime<'a> for TracingVM<'a> {
             );
         }
 
-        record
+        Ok(record)
     }
 
     fn mr_without_prot(&mut self, addr: u64) -> MemoryReadRecord {
@@ -1037,8 +1058,12 @@ impl<'a> SyscallRuntime<'a> for TracingVM<'a> {
         record
     }
 
-    fn mr_slice(&mut self, addr: u64, len: usize) -> (Vec<MemoryReadRecord>, Vec<PageProtRecord>) {
-        let (records, page_prot_records) = SyscallRuntime::mr_slice(self.core_mut(), addr, len);
+    fn mr_slice(
+        &mut self,
+        addr: u64,
+        len: usize,
+    ) -> Result<(Vec<MemoryReadRecord>, Vec<PageProtRecord>), ExecutionError> {
+        let (records, page_prot_records) = SyscallRuntime::mr_slice(self.core_mut(), addr, len)?;
 
         for (i, record) in records.iter().enumerate() {
             if let Some(local_memory_access) = &mut self.precompile_local_memory_access {
@@ -1067,11 +1092,11 @@ impl<'a> SyscallRuntime<'a> for TracingVM<'a> {
             }
         }
 
-        (records, page_prot_records)
+        Ok((records, page_prot_records))
     }
 
-    fn mw(&mut self, addr: u64) -> MemoryWriteRecord {
-        let record = SyscallRuntime::mw(self.core_mut(), addr);
+    fn mw(&mut self, addr: u64) -> Result<MemoryWriteRecord, ExecutionError> {
+        let record = SyscallRuntime::mw(self.core_mut(), addr)?;
 
         if let Some(local_memory_access) = &mut self.precompile_local_memory_access {
             local_memory_access.insert_record(addr, record);
@@ -1096,7 +1121,7 @@ impl<'a> SyscallRuntime<'a> for TracingVM<'a> {
             );
         }
 
-        record
+        Ok(record)
     }
 
     fn mw_without_prot(&mut self, addr: u64) -> MemoryWriteRecord {
@@ -1109,8 +1134,12 @@ impl<'a> SyscallRuntime<'a> for TracingVM<'a> {
         record
     }
 
-    fn mw_slice(&mut self, addr: u64, len: usize) -> (Vec<MemoryWriteRecord>, Vec<PageProtRecord>) {
-        let (records, page_prot_records) = SyscallRuntime::mw_slice(self.core_mut(), addr, len);
+    fn mw_slice(
+        &mut self,
+        addr: u64,
+        len: usize,
+    ) -> Result<(Vec<MemoryWriteRecord>, Vec<PageProtRecord>), ExecutionError> {
+        let (records, page_prot_records) = SyscallRuntime::mw_slice(self.core_mut(), addr, len)?;
 
         for (i, record) in records.iter().enumerate() {
             if let Some(local_memory_access) = &mut self.precompile_local_memory_access {
@@ -1139,7 +1168,7 @@ impl<'a> SyscallRuntime<'a> for TracingVM<'a> {
             }
         }
 
-        (records, page_prot_records)
+        Ok((records, page_prot_records))
     }
 
     fn page_prot_write(&mut self, page_idx: u64, prot: u8) -> PageProtRecord {
@@ -1327,9 +1356,9 @@ impl<'a> SyscallRuntime<'a> for PrecompileMemory<'a, '_> {
         start_page_idx: u64,
         end_page_idx: u64,
         page_prot_bitmap: u8,
-    ) -> Vec<PageProtRecord> {
+    ) -> Result<Vec<PageProtRecord>, ExecutionError> {
         let records =
-            self.inner.page_prot_range_check(start_page_idx, end_page_idx, page_prot_bitmap);
+            self.inner.page_prot_range_check(start_page_idx, end_page_idx, page_prot_bitmap)?;
         let clk = self.inner.core.clk();
         for record in &records {
             if let Some(local_page_prot_access) = &mut self.inner.precompile_local_page_prot_access
@@ -1349,7 +1378,7 @@ impl<'a> SyscallRuntime<'a> for PrecompileMemory<'a, '_> {
                 );
             }
         }
-        records
+        Ok(records)
     }
 
     fn rr(&mut self, reg_no: usize) -> MemoryReadRecord {
@@ -1378,8 +1407,8 @@ impl<'a> SyscallRuntime<'a> for PrecompileMemory<'a, '_> {
         record
     }
 
-    fn mr(&mut self, addr: u64) -> MemoryReadRecord {
-        let record = self.inner.mr(addr);
+    fn mr(&mut self, addr: u64) -> Result<MemoryReadRecord, ExecutionError> {
+        let record = self.inner.mr(addr)?;
 
         if let Some(local_memory_access) = &mut self.inner.precompile_local_memory_access {
             local_memory_access.insert_record(addr, record);
@@ -1387,11 +1416,11 @@ impl<'a> SyscallRuntime<'a> for PrecompileMemory<'a, '_> {
             self.inner.local_memory_access.insert_record(addr, record);
         }
 
-        record
+        Ok(record)
     }
 
-    fn mw(&mut self, addr: u64) -> MemoryWriteRecord {
-        let record = self.inner.mw(addr);
+    fn mw(&mut self, addr: u64) -> Result<MemoryWriteRecord, ExecutionError> {
+        let record = self.inner.mw(addr)?;
 
         if let Some(local_memory_access) = &mut self.inner.precompile_local_memory_access {
             local_memory_access.insert_record(addr, record);
@@ -1399,11 +1428,15 @@ impl<'a> SyscallRuntime<'a> for PrecompileMemory<'a, '_> {
             self.inner.local_memory_access.insert_record(addr, record);
         }
 
-        record
+        Ok(record)
     }
 
-    fn mr_slice(&mut self, addr: u64, len: usize) -> (Vec<MemoryReadRecord>, Vec<PageProtRecord>) {
-        let (records, page_prot_records) = self.inner.mr_slice(addr, len);
+    fn mr_slice(
+        &mut self,
+        addr: u64,
+        len: usize,
+    ) -> Result<(Vec<MemoryReadRecord>, Vec<PageProtRecord>), ExecutionError> {
+        let (records, page_prot_records) = self.inner.mr_slice(addr, len)?;
 
         for (i, record) in records.iter().enumerate() {
             if let Some(local_memory_access) = &mut self.inner.precompile_local_memory_access {
@@ -1413,7 +1446,7 @@ impl<'a> SyscallRuntime<'a> for PrecompileMemory<'a, '_> {
             }
         }
 
-        (records, page_prot_records)
+        Ok((records, page_prot_records))
     }
 
     fn mr_without_prot(&mut self, addr: u64) -> MemoryReadRecord {
@@ -1428,8 +1461,12 @@ impl<'a> SyscallRuntime<'a> for PrecompileMemory<'a, '_> {
         record
     }
 
-    fn mw_slice(&mut self, addr: u64, len: usize) -> (Vec<MemoryWriteRecord>, Vec<PageProtRecord>) {
-        let (records, page_prot_records) = self.inner.mw_slice(addr, len);
+    fn mw_slice(
+        &mut self,
+        addr: u64,
+        len: usize,
+    ) -> Result<(Vec<MemoryWriteRecord>, Vec<PageProtRecord>), ExecutionError> {
+        let (records, page_prot_records) = self.inner.mw_slice(addr, len)?;
 
         for (i, record) in records.iter().enumerate() {
             if let Some(local_memory_access) = &mut self.inner.precompile_local_memory_access {
@@ -1439,7 +1476,7 @@ impl<'a> SyscallRuntime<'a> for PrecompileMemory<'a, '_> {
             }
         }
 
-        (records, page_prot_records)
+        Ok((records, page_prot_records))
     }
 
     fn mw_without_prot(&mut self, addr: u64) -> MemoryWriteRecord {

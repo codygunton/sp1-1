@@ -1,14 +1,14 @@
 use num::{BigUint, One, Zero};
 
 use sp1_curves::edwards::WORDS_FIELD_ELEMENT;
-use sp1_jit::SyscallContext;
+use sp1_jit::{Interrupt, SyscallContext};
 use sp1_primitives::consts::{bytes_to_words_le, words_to_bytes_le_vec, WORD_BYTE_SIZE};
 
 pub(crate) unsafe fn uint256_mul(
     ctx: &mut impl SyscallContext,
     arg1: u64,
     arg2: u64,
-) -> Option<u64> {
+) -> Result<Option<u64>, Interrupt> {
     let x_ptr = arg1;
     if !x_ptr.is_multiple_of(8) {
         panic!();
@@ -18,12 +18,17 @@ pub(crate) unsafe fn uint256_mul(
         panic!();
     }
 
+    ctx.read_slice_check(y_ptr, WORDS_FIELD_ELEMENT * 2)?;
+    ctx.bump_memory_clk();
+    ctx.read_write_slice_check(x_ptr, 4)?;
+
     // First read the words for the x value. We can read a slice_unsafe here because we write
     // the computed result to x later.
     let x = words_to_bytes_le_vec(ctx.mr_slice_unsafe(x_ptr, WORDS_FIELD_ELEMENT));
 
     // Read the y value.
-    let y_and_modulus = words_to_bytes_le_vec(ctx.mr_slice(y_ptr, WORDS_FIELD_ELEMENT * 2));
+    let y_and_modulus =
+        words_to_bytes_le_vec(ctx.mr_slice_without_prot(y_ptr, WORDS_FIELD_ELEMENT * 2));
 
     let (y, modulus) = y_and_modulus.split_at(WORDS_FIELD_ELEMENT * WORD_BYTE_SIZE);
 
@@ -49,7 +54,7 @@ pub(crate) unsafe fn uint256_mul(
     ctx.bump_memory_clk();
 
     // Write the result to x and keep track of the memory records.
-    ctx.mw_slice(x_ptr, &result);
+    ctx.mw_slice_without_prot(x_ptr, &result);
 
-    None
+    Ok(None)
 }

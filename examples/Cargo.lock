@@ -3310,6 +3310,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "many-traps-program"
+version = "1.1.0"
+dependencies = [
+ "rand 0.8.5",
+ "sp1-primitives 6.0.0",
+ "sp1-zkvm",
+]
+
+[[package]]
+name = "many-traps-script"
+version = "1.1.0"
+dependencies = [
+ "sp1-build",
+ "sp1-core-executor",
+ "sp1-core-machine",
+ "sp1-primitives 6.0.0",
+ "sp1-prover",
+ "sp1-sdk",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6211,6 +6234,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "sigreturn-program"
+version = "1.1.0"
+dependencies = [
+ "rand 0.8.5",
+ "sp1-primitives 6.0.0",
+ "sp1-zkvm",
+]
+
+[[package]]
+name = "sigreturn-script"
+version = "1.1.0"
+dependencies = [
+ "sp1-build",
+ "sp1-core-executor",
+ "sp1-core-machine",
+ "sp1-primitives 6.0.0",
+ "sp1-prover",
+ "sp1-sdk",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "slab"
 version = "0.4.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8060,6 +8106,29 @@ checksum = "1ad61aed86bc3faea4300c7aee358b4c6d0c8d6ccc36524c96e4c92ccf26e77e"
 dependencies = [
  "num-integer",
  "strength_reduce",
+]
+
+[[package]]
+name = "trap-program"
+version = "1.1.0"
+dependencies = [
+ "rand 0.8.5",
+ "sp1-primitives 6.0.0",
+ "sp1-zkvm",
+]
+
+[[package]]
+name = "trap-script"
+version = "1.1.0"
+dependencies = [
+ "sp1-build",
+ "sp1-core-executor",
+ "sp1-core-machine",
+ "sp1-primitives 6.0.0",
+ "sp1-prover",
+ "sp1-sdk",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

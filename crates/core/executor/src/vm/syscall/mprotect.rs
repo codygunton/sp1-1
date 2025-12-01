@@ -1,8 +1,8 @@
 use crate::{
     events::{MProtectEvent, PrecompileEvent},
     memory::MAX_LOG_ADDR,
-    SyscallCode,
     vm::syscall::SyscallRuntime,
+    ExecutionError, SyscallCode,
 };
 
 use sp1_primitives::consts::PAGE_SIZE;
@@ -12,7 +12,7 @@ pub(crate) fn mprotect<'a, RT: SyscallRuntime<'a>>(
     syscall_code: SyscallCode,
     addr: u64,
     prot: u64,
-) -> Option<u64> {
+) -> Result<Option<u64>, ExecutionError> {
     let prot: u8 = prot.try_into().expect("prot must be 8 bits");
 
     assert!(addr.is_multiple_of(PAGE_SIZE as u64), "addr must be page aligned");
@@ -44,5 +44,5 @@ pub(crate) fn mprotect<'a, RT: SyscallRuntime<'a>>(
         );
     }
 
-    None
+    Ok(None)
 }

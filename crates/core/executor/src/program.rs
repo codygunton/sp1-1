@@ -38,6 +38,8 @@ pub struct Program {
     pub pc_start_abs: u64,
     /// The base address of the program.
     pub pc_base: u64,
+    /// The trap context address of the program.
+    pub(crate) trap_context: Option<u64>,
     /// The initial page protection image, mapping page indices to protection flags.
     pub page_prot_image: HashMap<u64, u8>,
     /// The initial memory image, useful for global constants
@@ -65,6 +67,7 @@ impl Program {
             instructions_encoded: None,
             pc_start_abs,
             pc_base,
+            trap_context: None,
             page_prot_image: HashMap::new(),
             memory_image: Arc::new(HashMap::new()),
             preprocessed_shape: None,
@@ -109,6 +112,7 @@ impl Program {
             instructions_encoded: Some(instructions_encoded),
             pc_start_abs: elf.pc_start,
             pc_base: elf.pc_base,
+            trap_context: elf.trap_context,
             memory_image: elf.memory_image,
             page_prot_image: elf.page_prot_image,
             preprocessed_shape: None,

@@ -1,7 +1,7 @@
 use crate::{
     events::{PrecompileEvent, Uint256OpsEvent, Uint256OpsPageProtRecords},
     vm::syscall::SyscallRuntime,
-    SyscallCode,
+    ExecutionError, SyscallCode,
 };
 
 const U256_NUM_WORDS: usize = 4;
@@ -12,7 +12,7 @@ pub(crate) fn uint256_ops<'a, RT: SyscallRuntime<'a>>(
     syscall_code: SyscallCode,
     arg1: u64,
     arg2: u64,
-) -> Option<u64> {
+) -> Result<Option<u64>, ExecutionError> {
     let clk = rt.core().clk();
 
     let op = syscall_code.uint256_op_map();
@@ -27,24 +27,31 @@ pub(crate) fn uint256_ops<'a, RT: SyscallRuntime<'a>>(
     let d_ptr = d_ptr_memory.value;
     let e_ptr = e_ptr_memory.value;
 
+    let a_page_prot_records = rt.read_slice_check(a_ptr, U256_NUM_WORDS)?;
+    let b_page_prot_records = rt.read_slice_check(b_ptr, U256_NUM_WORDS)?;
+    let c_page_prot_records = rt.read_slice_check(c_ptr, U256_NUM_WORDS)?;
+    rt.increment_clk();
+    let d_page_prot_records = rt.write_slice_check(d_ptr, 4)?;
+    let e_page_prot_records = rt.write_slice_check(e_ptr, 4)?;
+
     // Read input values (8 words = 32 bytes each for uint256) and convert to BigUint
-    let (a_memory_records, a_page_prot_records) = rt.mr_slice(a_ptr, U256_NUM_WORDS);
+    let a_memory_records = rt.mr_slice_without_prot(a_ptr, U256_NUM_WORDS);
     rt.increment_clk();
     let a: Vec<_> = a_memory_records.iter().map(|record| record.value).collect();
-    let (b_memory_records, b_page_prot_records) = rt.mr_slice(b_ptr, U256_NUM_WORDS);
+    let b_memory_records = rt.mr_slice_without_prot(b_ptr, U256_NUM_WORDS);
     rt.increment_clk();
     let b: Vec<_> = b_memory_records.iter().map(|record| record.value).collect();
-    let (c_memory_records, c_page_prot_records) = rt.mr_slice(c_ptr, U256_NUM_WORDS);
+    let c_memory_records = rt.mr_slice_without_prot(c_ptr, U256_NUM_WORDS);
     let c: Vec<_> = c_memory_records.iter().map(|record| record.value).collect();
 
     rt.increment_clk();
 
-    let (d_memory_records, d_page_prot_records) = rt.mw_slice(d_ptr, U256_NUM_WORDS);
+    let d_memory_records = rt.mw_slice_without_prot(d_ptr, U256_NUM_WORDS);
     let d: Vec<_> = d_memory_records.iter().map(|record| record.value).collect();
 
     rt.increment_clk();
 
-    let (e_memory_records, e_page_prot_records) = rt.mw_slice(e_ptr, U256_NUM_WORDS);
+    let e_memory_records = rt.mw_slice_without_prot(e_ptr, U256_NUM_WORDS);
     let e: Vec<_> = e_memory_records.iter().map(|record| record.value).collect();
 
     if RT::TRACING {
@@ -94,5 +101,5 @@ pub(crate) fn uint256_ops<'a, RT: SyscallRuntime<'a>>(
         rt.add_precompile_event(syscall_code, syscall_event, event);
     }
 
-    None
+    Ok(None)
 }

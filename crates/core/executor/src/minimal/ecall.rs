@@ -9,6 +9,7 @@ use super::{
         mprotect::mprotect_syscall,
         poseidon2::poseidon2,
         sha256::{sha256_compress, sha256_extend},
+        sig_return::sig_return_syscall,
         uint256::uint256_mul,
         uint256_ops::uint256_ops,
         uint256x2048::u256x2048_mul,
@@ -29,7 +30,7 @@ use sp1_curves::{
         secp256r1::Secp256r1,
     },
 };
-use sp1_jit::{RiscRegister, SyscallContext};
+use sp1_jit::{Interrupt, RiscRegister, SyscallContext};
 
 // Used by the x86_64 JIT executor. When profiling is enabled, only compiled for tests.
 #[allow(dead_code)]
@@ -45,7 +46,7 @@ pub(super) extern "C" fn sp1_ecall_handler(ctx: *mut sp1_jit::JitContext) -> u64
     // Store the clock from when we enter.
     let (pc, clk) = (ctx.pc, ctx.clk);
 
-    let result = ecall_handler(ctx, code);
+    let result = ecall_handler(ctx, code).expect("todo: handle interrupt");
 
     match code {
         SyscallCode::EXIT_UNCONSTRAINED => {
@@ -59,6 +60,10 @@ pub(super) extern "C" fn sp1_ecall_handler(ctx: *mut sp1_jit::JitContext) -> u64
             ctx.pc = 1;
             ctx.clk = clk.wrapping_add(256);
         }
+        SyscallCode::SIG_RETURN => {
+            // PC will be updated by sigreturn.
+            ctx.clk = clk.wrapping_add(256);
+        }
         // In the normal case, we just want to advance to the next instruction.
         _ => {
             ctx.pc = pc.wrapping_add(4);
@@ -69,7 +74,7 @@ pub(super) extern "C" fn sp1_ecall_handler(ctx: *mut sp1_jit::JitContext) -> u64
     result
 }
 
-pub fn ecall_handler(ctx: &mut impl SyscallContext, code: SyscallCode) -> u64 {
+pub fn ecall_handler(ctx: &mut impl SyscallContext, code: SyscallCode) -> Result<u64, Interrupt> {
     let arg1 = ctx.rr(RiscRegister::X10);
     let arg2 = ctx.rr(RiscRegister::X11);
 
@@ -141,26 +146,27 @@ pub fn ecall_handler(ctx: &mut impl SyscallContext, code: SyscallCode) -> u64 {
         SyscallCode::U256XU2048_MUL => unsafe { u256x2048_mul(ctx, arg1, arg2) },
         SyscallCode::ENTER_UNCONSTRAINED => {
             ctx.enter_unconstrained().expect("Failed to enter unconstrained mode");
-            Some(1)
+            Ok(Some(1))
         }
         SyscallCode::EXIT_UNCONSTRAINED => {
             ctx.exit_unconstrained();
-            Some(0)
+            Ok(Some(0))
         }
         SyscallCode::HINT_LEN => unsafe { hint_len(ctx, arg1, arg2) },
         SyscallCode::HINT_READ => unsafe { hint_read(ctx, arg1, arg2) },
-        SyscallCode::WRITE => unsafe { write(ctx, arg1, arg2) },
+        SyscallCode::WRITE => unsafe { Ok(write(ctx, arg1, arg2)) },
         SyscallCode::UINT256_MUL_CARRY | SyscallCode::UINT256_ADD_CARRY => unsafe {
             uint256_ops(ctx, arg1, arg2)
         },
         SyscallCode::POSEIDON2 => unsafe { poseidon2(ctx, arg1, arg2) },
         SyscallCode::HALT => {
             ctx.set_exit_code(arg1 as u32);
-            None
+            Ok(None)
         }
         SyscallCode::MPROTECT => mprotect_syscall(ctx, arg1, arg2),
+        SyscallCode::SIG_RETURN => sig_return_syscall(ctx, arg1, arg2),
         SyscallCode::VERIFY_SP1_PROOF
         | SyscallCode::COMMIT
-        | SyscallCode::COMMIT_DEFERRED_PROOFS => None,
-    }.unwrap_or(code as u64)
+        | SyscallCode::COMMIT_DEFERRED_PROOFS => Ok(None),
+    }.map(|r| r.unwrap_or(code as u64))
 }

@@ -1,7 +1,7 @@
 use crate::{
     events::{PrecompileEvent, ShaCompressEvent, ShaCompressPageProtAccess},
     vm::syscall::SyscallRuntime,
-    SyscallCode,
+    ExecutionError, SyscallCode,
 };
 
 pub(crate) fn sha256_compress<'a, RT: SyscallRuntime<'a>>(
@@ -9,24 +9,29 @@ pub(crate) fn sha256_compress<'a, RT: SyscallRuntime<'a>>(
     syscall_code: SyscallCode,
     arg1: u64,
     arg2: u64,
-) -> Option<u64> {
+) -> Result<Option<u64>, ExecutionError> {
     let w_ptr = arg1;
     let h_ptr = arg2;
     assert_ne!(w_ptr, h_ptr);
 
     let clk = rt.core().clk();
 
+    let h_read_page_prot_records = rt.read_slice_check(h_ptr, 8)?;
+    let w_read_page_prot_records = rt.read_slice_check(w_ptr, 64)?;
+    rt.increment_clk();
+    let h_write_page_prot_records = rt.write_slice_check(h_ptr, 8)?;
+
     // Execute the "initialize" phase where we read in the h values.
 
-    let (h_read_records, h_read_page_prot_records) = rt.mr_slice(h_ptr, 8);
+    let h_read_records = rt.mr_slice_without_prot(h_ptr, 8);
     let hx = h_read_records.iter().map(|r| r.value as u32).collect::<Vec<_>>();
 
     rt.increment_clk();
-    let (w_i_read_records, w_read_page_prot_records) = rt.mr_slice(w_ptr, 64);
+    let w_i_read_records = rt.mr_slice_without_prot(w_ptr, 64);
     let original_w = w_i_read_records.iter().map(|r| r.value as u32).collect::<Vec<_>>();
 
     rt.increment_clk();
-    let (h_write_records, h_write_page_prot_records) = rt.mw_slice(h_ptr, 8);
+    let h_write_records = rt.mw_slice_without_prot(h_ptr, 8);
 
     if RT::TRACING {
         let (local_mem_access, local_page_prot_access) = rt.postprocess_precompile();
@@ -61,5 +66,5 @@ pub(crate) fn sha256_compress<'a, RT: SyscallRuntime<'a>>(
         rt.add_precompile_event(syscall_code, syscall_event, event);
     }
 
-    None
+    Ok(None)
 }
