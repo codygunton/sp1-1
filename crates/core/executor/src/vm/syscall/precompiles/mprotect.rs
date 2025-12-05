@@ -2,17 +2,18 @@ use crate::{
     events::{MProtectEvent, PrecompileEvent},
     memory::MAX_LOG_ADDR,
     vm::syscall::SyscallRuntime,
-    ExecutionError, SyscallCode,
+    ExecutionMode, SyscallCode,
 };
 
 use sp1_primitives::consts::PAGE_SIZE;
 
-pub(crate) fn mprotect<'a, RT: SyscallRuntime<'a>>(
+#[allow(clippy::unnecessary_wraps)]
+pub(crate) fn mprotect<'a, M: ExecutionMode, RT: SyscallRuntime<'a, M>>(
     rt: &mut RT,
     syscall_code: SyscallCode,
     addr: u64,
     prot: u64,
-) -> Result<Option<u64>, ExecutionError> {
+) -> Option<u64> {
     let prot: u8 = prot.try_into().expect("prot must be 8 bits");
 
     assert!(addr.is_multiple_of(PAGE_SIZE as u64), "addr must be page aligned");
@@ -32,9 +33,11 @@ pub(crate) fn mprotect<'a, RT: SyscallRuntime<'a>>(
             syscall_code,
             addr,
             prot as u64,
-            false,
             rt.core().next_pc(),
             rt.core().exit_code(),
+            None,
+            None,
+            None,
         );
 
         rt.add_precompile_event(
@@ -44,5 +47,5 @@ pub(crate) fn mprotect<'a, RT: SyscallRuntime<'a>>(
         );
     }
 
-    Ok(None)
+    None
 }

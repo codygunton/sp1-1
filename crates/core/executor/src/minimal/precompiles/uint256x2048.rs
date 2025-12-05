@@ -23,12 +23,16 @@ pub(crate) unsafe fn u256x2048_mul(
     let lo_ptr = ctx.rr(X12);
     let hi_ptr = ctx.rr(X13);
 
+    let clk = ctx.get_current_clk();
     ctx.read_slice_check(a_ptr, U256_NUM_WORDS)?;
+    ctx.bump_memory_clk();
     ctx.read_slice_check(b_ptr, U2048_NUM_WORDS)?;
     ctx.bump_memory_clk();
     ctx.write_slice_check(lo_ptr, U2048_NUM_WORDS)?;
+    ctx.bump_memory_clk();
     ctx.write_slice_check(hi_ptr, U256_NUM_WORDS)?;
 
+    ctx.set_clk(clk);
     let a = words_to_bytes_le_vec(ctx.mr_slice_without_prot(a_ptr, U256_NUM_WORDS));
     ctx.bump_memory_clk();
     let b = words_to_bytes_le_vec(ctx.mr_slice_without_prot(b_ptr, U2048_NUM_WORDS));

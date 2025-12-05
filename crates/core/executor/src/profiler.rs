@@ -94,10 +94,6 @@ impl Profiler {
         }
     }
 
-    pub(super) fn new(elf_bytes: &[u8], sample_rate: u64) -> Result<Self, ProfilerError> {
-        Ok(Self::from_program(&Program::from(elf_bytes)?, sample_rate))
-    }
-
     pub(super) fn insert(&mut self, name: &str, addr: u64, len: u64) {
         let string_idx = self.builder.intern_string(name);
         let start_idx = self.function_ranges.len();

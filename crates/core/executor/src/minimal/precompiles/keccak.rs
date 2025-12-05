@@ -20,10 +20,12 @@ pub unsafe fn keccak_permute(
     // We are doing 2 separate checks here, since KeccakPermutePageProtRecords
     // requires separate read records from write records. Maybe we can merge the
     // two later
+    let clk = ctx.get_current_clk();
     ctx.read_slice_check(state_ptr, STATE_NUM_WORDS)?;
     ctx.bump_memory_clk();
     ctx.write_slice_check(state_ptr, STATE_NUM_WORDS)?;
 
+    ctx.set_clk(clk);
     let mut state: Vec<u64> = Vec::new();
 
     let state_values = ctx.mr_slice_without_prot(state_ptr, STATE_NUM_WORDS);

@@ -1,3 +1,4 @@
+use crate::events::{TrapExecEvent, TrapMemInstrEvent};
 use deepsize2::DeepSizeOf;
 use hashbrown::HashMap;
 use slop_air::AirBuilder;
@@ -113,6 +114,10 @@ pub struct ExecutionRecord {
     pub instruction_fetch_events: Vec<(InstructionFetchEvent, MemoryAccessRecord)>,
     /// A trace of all instruction decode events.
     pub instruction_decode_events: Vec<InstructionDecodeEvent>,
+    /// A trace of all trap on untrusted program execution.
+    pub trap_exec_events: Vec<TrapExecEvent>,
+    /// A trace of all trap on load and store events.
+    pub trap_load_store_events: Vec<(TrapMemInstrEvent, ITypeRecord)>,
     /// The global culmulative sum.
     pub global_cumulative_sum: Arc<Mutex<SepticDigest<u32>>>,
     /// The global interaction event count.
@@ -152,9 +157,16 @@ impl ExecutionRecord {
         global_dependencies_opt: bool,
     ) -> Self {
         let enable_untrusted_programs = program.enable_untrusted_programs as u32;
+        let trap_context = program.trap_context;
+        let untrusted_memory = program.untrusted_memory;
         let mut result = Self { program, ..Default::default() };
         result.public_values.proof_nonce = proof_nonce;
         result.public_values.is_untrusted_programs_enabled = enable_untrusted_programs;
+        result.public_values.enable_trap_handler = trap_context.is_some() as u32;
+        result.public_values.trap_context =
+            trap_context.map_or([0, 0, 0], |addr| [addr, addr + 8, addr + 16]);
+        result.public_values.untrusted_memory =
+            untrusted_memory.map_or([0, 0], |(start, end)| [start, end]);
         result.global_dependencies_opt = global_dependencies_opt;
         result
     }
@@ -167,6 +179,9 @@ impl ExecutionRecord {
         global_dependencies_opt: bool,
         reservation_size: usize,
     ) -> Self {
+        let enable_untrusted_programs = program.enable_untrusted_programs;
+        let trap_context = program.trap_context;
+        let untrusted_memory = program.untrusted_memory;
         let mut result = Self { program, ..Default::default() };
 
         result.add_events.reserve(reservation_size);
@@ -199,6 +214,12 @@ impl ExecutionRecord {
         result.byte_lookups.reserve(reservation_size);
 
         result.public_values.proof_nonce = proof_nonce;
+        result.public_values.is_untrusted_programs_enabled = enable_untrusted_programs as u32;
+        result.public_values.enable_trap_handler = trap_context.is_some() as u32;
+        result.public_values.trap_context =
+            trap_context.map_or([0, 0, 0], |addr| [addr, addr + 8, addr + 16]);
+        result.public_values.untrusted_memory =
+            untrusted_memory.map_or([0, 0], |(start, end)| [start, end]);
         result.global_dependencies_opt = global_dependencies_opt;
         result
     }
@@ -267,6 +288,8 @@ impl ExecutionRecord {
                     execution_record.public_values.update_initialized_state(
                         self.program.pc_start_abs,
                         self.program.enable_untrusted_programs,
+                        self.program.trap_context,
+                        self.program.untrusted_memory,
                     );
                     shards.push(execution_record);
                 }
@@ -284,6 +307,8 @@ impl ExecutionRecord {
                     execution_record.public_values.update_initialized_state(
                         self.program.pc_start_abs,
                         self.program.enable_untrusted_programs,
+                        self.program.trap_context,
+                        self.program.untrusted_memory,
                     );
                     execution_record
                 })
@@ -365,11 +390,6 @@ impl ExecutionRecord {
 
                     init_remaining = &init_remaining[init_to_take..];
                     finalize_remaining = &finalize_remaining[finalize_to_take..];
-
-                    // Ensure last record has same proof nonce as other shards
-                    mem_record_ref.public_values.is_untrusted_programs_enabled =
-                        self.public_values.is_untrusted_programs_enabled;
-                    mem_record_ref.public_values.proof_nonce = self.public_values.proof_nonce;
                     mem_record_ref.global_dependencies_opt = self.global_dependencies_opt;
 
                     if !pack_memory_events_into_last_record {
@@ -426,10 +446,6 @@ impl ExecutionRecord {
                     finalize_addr = last_event.addr;
                 }
                 mem_record_ref.public_values.last_finalize_addr = finalize_addr;
-
-                mem_record_ref.public_values.is_untrusted_programs_enabled =
-                    self.public_values.is_untrusted_programs_enabled;
-                mem_record_ref.public_values.proof_nonce = self.public_values.proof_nonce;
                 mem_record_ref.global_dependencies_opt = self.global_dependencies_opt;
 
                 mem_init_remaining = &mem_init_remaining[init_to_take..];
@@ -863,6 +879,7 @@ impl MachineRecord for ExecutionRecord {
         Self::eval_global_memory_finalize(public_values, builder);
         Self::eval_global_page_prot_init(public_values, builder);
         Self::eval_global_page_prot_finalize(public_values, builder);
+        Self::eval_trap_handler(public_values, builder);
     }
 
     fn interactions_in_public_values() -> Vec<InteractionKind> {
@@ -1493,6 +1510,61 @@ impl ExecutionRecord {
             ),
             InteractionScope::Local,
         );
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn eval_trap_handler<AB: SP1AirBuilder>(
+        public_values: &PublicValues<
+            [AB::PublicVar; 4],
+            [AB::PublicVar; 3],
+            [AB::PublicVar; 4],
+            AB::PublicVar,
+        >,
+        builder: &mut AB,
+    ) {
+        // `is_untrusted_programs_enabled` must be boolean.
+        builder.assert_bool(public_values.is_untrusted_programs_enabled);
+        // `enable_trap_handler` must be boolean.
+        builder.assert_bool(public_values.enable_trap_handler);
+
+        // If untrusted programs are not enabled, there are no trap handlers.
+        builder
+            .when_not(public_values.is_untrusted_programs_enabled)
+            .assert_zero(public_values.enable_trap_handler);
+
+        // The `trap_context` is with 16-bit limbs.
+        // If there are no trap handlers, `trap_context` is all zero.
+        for addr_idx in 0..3 {
+            builder
+                .when_not(public_values.enable_trap_handler)
+                .assert_all_zero(public_values.trap_context[addr_idx]);
+            for idx in 0..3 {
+                builder.send_byte(
+                    AB::Expr::from_canonical_u32(ByteOpcode::Range as u32),
+                    public_values.trap_context[addr_idx][idx].into(),
+                    AB::Expr::from_canonical_u32(16),
+                    AB::Expr::zero(),
+                    AB::Expr::one(),
+                );
+            }
+        }
+
+        // The `untrusted_memory` is with 16-bit limbs.
+        // If untrusted programs are not enabled, `untrusted_memory` is all zero.
+        for addr_idx in 0..2 {
+            builder
+                .when_not(public_values.is_untrusted_programs_enabled)
+                .assert_all_zero(public_values.untrusted_memory[addr_idx]);
+            for idx in 0..3 {
+                builder.send_byte(
+                    AB::Expr::from_canonical_u32(ByteOpcode::Range as u32),
+                    public_values.untrusted_memory[addr_idx][idx].into(),
+                    AB::Expr::from_canonical_u32(16),
+                    AB::Expr::zero(),
+                    AB::Expr::one(),
+                );
+            }
+        }
     }
 
     /// Finalize the public values.

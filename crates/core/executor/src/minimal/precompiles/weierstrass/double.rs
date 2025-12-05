@@ -7,5 +7,5 @@ pub(crate) unsafe fn weierstrass_double_assign_syscall<E: EllipticCurve>(
     arg1: u64,
     arg2: u64,
 ) -> Result<Option<u64>, Interrupt> {
-    crate::minimal::precompiles::ec::ec_double::<E>(ctx, arg1, arg2).map(|_| None)
+    crate::minimal::precompiles::ec::ec_double::<E>(ctx, arg1, arg2).map(|()| None)
 }

@@ -9,9 +9,9 @@ pub(crate) unsafe fn sha256_extend(
     let w_ptr = arg1;
     assert!(arg2 == 0, "arg2 must be 0");
 
-    ctx.prot_slice_check(w_ptr, 16, PROT_READ, true)?;
+    ctx.prot_slice_check(w_ptr, 16, PROT_READ)?;
     ctx.bump_memory_clk();
-    ctx.prot_slice_check(w_ptr + 16 * 8, 48, PROT_READ | PROT_WRITE, true)?;
+    ctx.prot_slice_check(w_ptr + 16 * 8, 48, PROT_READ | PROT_WRITE)?;
 
     for i in 16..64 {
         // Read w[i-15].

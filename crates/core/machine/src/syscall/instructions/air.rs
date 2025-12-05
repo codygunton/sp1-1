@@ -17,23 +17,25 @@ use crate::{
     adapter::{register::r_type::RTypeReader, state::CPUState},
     air::{SP1CoreAirBuilder, SP1Operation, WordAirBuilder},
     operations::{
-        IsZeroOperation, IsZeroOperationInput, SP1FieldWordRangeChecker, U16toU8OperationSafe,
-        U16toU8OperationSafeInput,
+        IsZeroOperation, IsZeroOperationInput, SP1FieldWordRangeChecker, TrapOperation,
+        U16toU8OperationSafe, U16toU8OperationSafeInput,
     },
+    TrustMode, UserMode,
 };
 
 use super::{columns::SyscallInstrColumns, SyscallInstrsChip};
 
-impl<AB> Air<AB> for SyscallInstrsChip
+impl<AB, M> Air<AB> for SyscallInstrsChip<M>
 where
     AB: SP1CoreAirBuilder,
     AB::Var: Sized,
+    M: TrustMode,
 {
     #[inline(never)]
     fn eval(&self, builder: &mut AB) {
         let main = builder.main();
         let local = main.row_slice(0);
-        let local: &SyscallInstrColumns<AB::Var> = (*local).borrow();
+        let local: &SyscallInstrColumns<AB::Var, M> = (*local).borrow();
 
         let public_values_slice: [AB::PublicVar; SP1_PROOF_NUM_PV_ELTS] =
             core::array::from_fn(|i| builder.public_values()[i]);
@@ -84,23 +86,40 @@ where
         );
         builder.when(local.is_real).assert_zero(local.adapter.op_a_0);
 
+        let mut is_sig_return = AB::Expr::zero();
+        let mut is_trap = AB::Expr::zero();
+        let mut trap_code = AB::Expr::zero();
+        if !M::IS_TRUSTED {
+            let local = main.row_slice(0);
+            let local: &SyscallInstrColumns<AB::Var, UserMode> = (*local).borrow();
+            is_sig_return = self.eval_sig_return(builder, &a, local);
+            (is_trap, trap_code) = self.eval_trap(builder, local);
+        }
+
+        builder.assert_eq(
+            public_values.is_untrusted_programs_enabled,
+            AB::Expr::from_bool(!M::IS_TRUSTED),
+        );
+
+        builder.assert_bool(local.is_halt + is_sig_return.clone() + is_trap.clone());
+
         // If the syscall is not halt, then next_pc should be pc + 4.
         // `next_pc` is constrained for the case where `is_halt` is false to be `pc + 4`.
         builder
             .when(local.is_real)
-            .when(AB::Expr::one() - local.is_halt)
+            .when(AB::Expr::one() - local.is_halt - is_sig_return.clone() - is_trap.clone())
             .assert_eq(local.next_pc[0], local.state.pc[0] + AB::Expr::from_canonical_u32(4));
         builder
             .when(local.is_real)
-            .when(AB::Expr::one() - local.is_halt)
+            .when(AB::Expr::one() - local.is_halt - is_sig_return.clone() - is_trap.clone())
             .assert_eq(local.next_pc[1], local.state.pc[1]);
         builder
             .when(local.is_real)
-            .when(AB::Expr::one() - local.is_halt)
+            .when(AB::Expr::one() - local.is_halt - is_sig_return.clone() - is_trap.clone())
             .assert_eq(local.next_pc[2], local.state.pc[2]);
 
         // ECALL instruction.
-        self.eval_ecall(builder, &a, local);
+        self.eval_ecall(builder, &a, local, trap_code);
 
         // COMMIT/COMMIT_DEFERRED_PROOFS ecall instruction.
         self.eval_commit(
@@ -121,7 +140,7 @@ where
     }
 }
 
-impl SyscallInstrsChip {
+impl<M: TrustMode> SyscallInstrsChip<M> {
     /// Constraints related to the ECALL opcode.
     ///
     /// This method will do the following:
@@ -131,7 +150,8 @@ impl SyscallInstrsChip {
         &self,
         builder: &mut AB,
         prev_a_byte: &[AB::Expr; 8],
-        local: &SyscallInstrColumns<AB::Var>,
+        local: &SyscallInstrColumns<AB::Var, M>,
+        trap_code: AB::Expr,
     ) {
         // We interpret the syscall_code as little-endian bytes and interpret each byte as a u8
         // with different information.
@@ -146,6 +166,7 @@ impl SyscallInstrsChip {
         builder.when(send_to_table.clone()).assert_zero(local.adapter.b()[3]);
         builder.when(send_to_table.clone()).assert_zero(local.adapter.c()[3]);
         builder.assert_bool(send_to_table.clone());
+        builder.when_not(send_to_table.clone()).assert_zero(trap_code.clone());
 
         let b_address = [local.adapter.b()[0], local.adapter.b()[1], local.adapter.b()[2]];
         let c_address = [local.adapter.c()[0], local.adapter.c()[1], local.adapter.c()[2]];
@@ -154,6 +175,7 @@ impl SyscallInstrsChip {
             local.state.clk_high::<AB>(),
             local.state.clk_low::<AB>(),
             syscall_id.clone(),
+            trap_code.clone(),
             b_address,
             c_address,
             send_to_table.clone(),
@@ -236,7 +258,7 @@ impl SyscallInstrsChip {
         &self,
         builder: &mut AB,
         prev_a_byte: &[AB::Expr; 8],
-        local: &SyscallInstrColumns<AB::Var>,
+        local: &SyscallInstrColumns<AB::Var, M>,
         commit_syscall: AB::PublicVar,
         commit_deferred_syscall: AB::PublicVar,
         commit_digest: [[AB::PublicVar; 4]; PV_DIGEST_NUM_WORDS],
@@ -333,11 +355,98 @@ impl SyscallInstrsChip {
             .assert_eq(expected_deferred_proofs_digest_element, digest_word.reduce::<AB>());
     }
 
+    /// Constraints on `SIG_RETURN` syscall.
+    pub(crate) fn eval_sig_return<AB: SP1CoreAirBuilder>(
+        &self,
+        builder: &mut AB,
+        prev_a_byte: &[AB::Expr; 8],
+        local: &SyscallInstrColumns<AB::Var, UserMode>,
+    ) -> AB::Expr {
+        let syscall_id = prev_a_byte[0].clone();
+        let is_sig_return = {
+            IsZeroOperation::<AB::F>::eval(
+                builder,
+                IsZeroOperationInput::new(
+                    syscall_id.clone()
+                        - AB::Expr::from_canonical_u32(SyscallCode::SIG_RETURN.syscall_id()),
+                    local.user_mode_cols.is_sig_return,
+                    local.is_real.into(),
+                ),
+            );
+            local.user_mode_cols.is_sig_return.result
+        };
+
+        builder.assert_bool(is_sig_return);
+        builder.when_not(local.is_real).assert_zero(is_sig_return);
+
+        builder.eval_memory_access_read(
+            local.state.clk_high::<AB>(),
+            local.state.clk_low::<AB>(),
+            &[
+                local.adapter.b()[0].into(),
+                local.adapter.b()[1].into(),
+                local.adapter.b()[2].into(),
+            ],
+            local.user_mode_cols.next_pc_record,
+            is_sig_return,
+        );
+
+        let next_pc = local.user_mode_cols.next_pc_record.prev_value;
+        builder.when(is_sig_return).assert_eq(local.next_pc[0], next_pc[0]);
+        builder.when(is_sig_return).assert_eq(local.next_pc[1], next_pc[1]);
+        builder.when(is_sig_return).assert_eq(local.next_pc[2], next_pc[2]);
+        builder.when(is_sig_return).assert_zero(next_pc[3]);
+
+        is_sig_return.into()
+    }
+
+    /// Constraints on trapping in a syscall.
+    pub(crate) fn eval_trap<AB: SP1CoreAirBuilder>(
+        &self,
+        builder: &mut AB,
+        local: &SyscallInstrColumns<AB::Var, UserMode>,
+    ) -> (AB::Expr, AB::Expr) {
+        let is_not_trap = {
+            IsZeroOperation::<AB::F>::eval(
+                builder,
+                IsZeroOperationInput::new(
+                    local.user_mode_cols.trap_code.into(),
+                    local.user_mode_cols.is_not_trap,
+                    local.is_real.into(),
+                ),
+            );
+            local.user_mode_cols.is_not_trap.result
+        };
+
+        builder.assert_bool(is_not_trap);
+        builder.when_not(local.is_real).assert_zero(is_not_trap);
+
+        let is_trap = local.is_real.into() - is_not_trap.into();
+        builder.assert_bool(is_trap.clone());
+
+        let next_pc = TrapOperation::<AB::F>::eval(
+            builder,
+            local.user_mode_cols.trap_operation,
+            local.state.clk_high::<AB>(),
+            local.state.clk_low::<AB>(),
+            local.user_mode_cols.trap_code.into(),
+            local.state.pc.map(Into::into),
+            local.user_mode_cols.addresses,
+            is_trap.clone(),
+        );
+
+        builder.when(is_trap.clone()).assert_eq(local.next_pc[0], next_pc[0]);
+        builder.when(is_trap.clone()).assert_eq(local.next_pc[1], next_pc[1]);
+        builder.when(is_trap.clone()).assert_eq(local.next_pc[2], next_pc[2]);
+
+        (is_trap, local.user_mode_cols.trap_code.into())
+    }
+
     /// Constraint related to the halt and unimpl instruction.
     pub(crate) fn eval_halt_unimpl<AB: SP1AirBuilder>(
         &self,
         builder: &mut AB,
-        local: &SyscallInstrColumns<AB::Var>,
+        local: &SyscallInstrColumns<AB::Var, M>,
         public_values: &PublicValues<
             [AB::PublicVar; 4],
             [AB::PublicVar; 3],
@@ -361,7 +470,7 @@ impl SyscallInstrsChip {
     pub(crate) fn eval_page_protect<AB: SP1CoreAirBuilder>(
         &self,
         builder: &mut AB,
-        local: &SyscallInstrColumns<AB::Var>,
+        local: &SyscallInstrColumns<AB::Var, M>,
         prev_a_byte: &[AB::Expr; 8],
         is_page_protect_active: AB::PublicVar,
     ) {
@@ -389,7 +498,7 @@ impl SyscallInstrsChip {
         &self,
         builder: &mut AB,
         prev_a_byte: &[AB::Expr; 8],
-        local: &SyscallInstrColumns<AB::Var>,
+        local: &SyscallInstrColumns<AB::Var, M>,
     ) {
         // `is_halt` is checked to be correct in `eval_is_halt_syscall`.
         let syscall_id = prev_a_byte[0].clone();
@@ -422,7 +531,7 @@ impl SyscallInstrsChip {
         prev_a_byte: &[AB::Expr; 8],
         commit_syscall: AB::PublicVar,
         commit_deferred_syscall: AB::PublicVar,
-        local: &SyscallInstrColumns<AB::Var>,
+        local: &SyscallInstrColumns<AB::Var, M>,
     ) -> (AB::Expr, AB::Expr) {
         let syscall_id = prev_a_byte[0].clone();
 

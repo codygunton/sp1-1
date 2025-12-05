@@ -65,6 +65,11 @@ impl<F: PrimeField32> MachineAir<F> for RangeChip<F> {
             input.public_values.last_init_addr,
             input.public_values.previous_finalize_addr,
             input.public_values.last_finalize_addr,
+            input.public_values.trap_context[0],
+            input.public_values.trap_context[1],
+            input.public_values.trap_context[2],
+            input.public_values.untrusted_memory[0],
+            input.public_values.untrusted_memory[1],
         ] {
             let limb_0 = (addr & 0xFFFF) as u16;
             let limb_1 = ((addr >> 16) & 0xFFFF) as u16;

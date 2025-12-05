@@ -303,6 +303,15 @@ impl SyscallCode {
         }
     }
 
+    /// Get the ID of the AIR used based on the `enable_untrusted_programs` flag.
+    #[must_use]
+    pub fn as_air_id_flag(self, enable_untrusted_programs: bool) -> Option<RiscvAirId> {
+        if enable_untrusted_programs {
+            return self.as_air_id_user();
+        }
+        self.as_air_id()
+    }
+
     /// Get the ID of the AIR used in the syscall implementation.
     #[must_use]
     pub fn as_air_id(self) -> Option<RiscvAirId> {
@@ -344,8 +353,8 @@ impl SyscallCode {
             }
             SyscallCode::MPROTECT => RiscvAirId::Mprotect,
             SyscallCode::POSEIDON2 => RiscvAirId::Poseidon2,
+            SyscallCode::SIG_RETURN => RiscvAirId::SigReturn,
             SyscallCode::HALT
-            | SyscallCode::SIG_RETURN
             | SyscallCode::WRITE
             | SyscallCode::ENTER_UNCONSTRAINED
             | SyscallCode::EXIT_UNCONSTRAINED
@@ -400,9 +409,9 @@ impl SyscallCode {
                 RiscvAirId::Uint256OpsUser
             }
             SyscallCode::MPROTECT => RiscvAirId::Mprotect,
+            SyscallCode::SIG_RETURN => RiscvAirId::SigReturn,
             SyscallCode::POSEIDON2 => RiscvAirId::Poseidon2User,
             SyscallCode::HALT
-            | SyscallCode::SIG_RETURN
             | SyscallCode::WRITE
             | SyscallCode::ENTER_UNCONSTRAINED
             | SyscallCode::EXIT_UNCONSTRAINED

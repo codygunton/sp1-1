@@ -26,23 +26,26 @@ mod cost;
 mod debug;
 mod disassembler;
 mod errors;
+mod mode;
+pub use mode::{ExecutionMode, SupervisorMode, UserMode};
 pub mod events;
 mod hook;
 mod instruction;
 mod tracing;
-pub use tracing::TracingVM;
+pub use tracing::{TracingVM, TracingVMEnum};
 mod vm;
 pub use vm::{
     gas::get_complexity_mapping,
-    memory::CompressedMemory,
+    memory::{CompressedMemory, CompressedPages},
     results::CycleResult,
+    results::TrapResult,
     shapes::{MAXIMUM_CYCLE_AREA, MAXIMUM_PADDING_AREA},
     CoreVM,
 };
 mod splicing;
-pub use splicing::{SplicedMinimalTrace, SplicingVM};
+pub use splicing::{SplicedMinimalTrace, SplicingVM, SplicingVMEnum};
 mod estimating;
-pub use estimating::GasEstimatingVM;
+pub use estimating::{GasEstimatingVM, GasEstimatingVMEnum};
 
 mod minimal;
 pub use minimal::*;

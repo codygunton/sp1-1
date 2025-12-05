@@ -1,7 +1,5 @@
 //! Programs that can be executed by the SP1 zkVM.
 
-use std::{fs::File, io::Read, str::FromStr};
-
 use crate::{
     disassembler::{transpile, Elf},
     instruction::Instruction,
@@ -11,15 +9,17 @@ use hashbrown::HashMap;
 use serde::{Deserialize, Serialize};
 use slop_algebra::{Field, PrimeField32};
 use slop_maybe_rayon::prelude::{IntoParallelIterator, ParallelBridge, ParallelIterator};
+use sp1_hypercube::addr_to_limbs;
 use sp1_hypercube::{
     air::{MachineAir, MachineProgram},
     septic_curve::{SepticCurve, SepticCurveComplete},
     septic_digest::SepticDigest,
     shape::Shape,
-    InteractionKind,
+    InteractionKind, UntrustedConfig,
 };
 use sp1_primitives::consts::split_page_idx;
 use std::sync::Arc;
+use std::{fs::File, io::Read, str::FromStr};
 
 /// The maximum number of instructions in a program.
 pub const MAX_PROGRAM_SIZE: usize = 1 << 22;
@@ -39,7 +39,7 @@ pub struct Program {
     /// The base address of the program.
     pub pc_base: u64,
     /// The trap context address of the program.
-    pub(crate) trap_context: Option<u64>,
+    pub trap_context: Option<u64>,
     /// The initial page protection image, mapping page indices to protection flags.
     pub page_prot_image: HashMap<u64, u8>,
     /// The initial memory image, useful for global constants
@@ -157,11 +157,7 @@ impl Program {
 
 impl<F: PrimeField32> MachineProgram<F> for Program {
     fn pc_start(&self) -> [F; 3] {
-        [
-            F::from_canonical_u16((self.pc_start_abs & 0xFFFF) as u16),
-            F::from_canonical_u16(((self.pc_start_abs >> 16) & 0xFFFF) as u16),
-            F::from_canonical_u16(((self.pc_start_abs >> 32) & 0xFFFF) as u16),
-        ]
+        addr_to_limbs(self.pc_start_abs)
     }
 
     fn initial_global_cumulative_sum(&self) -> SepticDigest<F> {
@@ -226,7 +222,16 @@ impl<F: PrimeField32> MachineProgram<F> for Program {
         )
     }
 
-    fn enable_untrusted_programs(&self) -> F {
-        F::from_bool(self.enable_untrusted_programs)
+    fn untrusted_config(&self) -> UntrustedConfig<F> {
+        UntrustedConfig {
+            enable_untrusted_programs: F::from_bool(self.enable_untrusted_programs),
+            enable_trap_handler: F::from_bool(self.trap_context.is_some()),
+            trap_context: self.trap_context.map_or([[F::zero(); 3]; 3], |addr| {
+                [addr_to_limbs(addr), addr_to_limbs(addr + 8), addr_to_limbs(addr + 16)]
+            }),
+            untrusted_memory: self.untrusted_memory.map_or([[F::zero(); 3]; 2], |(start, end)| {
+                [addr_to_limbs(start), addr_to_limbs(end)]
+            }),
+        }
     }
 }

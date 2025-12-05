@@ -5,7 +5,7 @@ use clap::Parser;
 use slop_algebra::AbstractField;
 use sp1_core_executor::SP1CoreOpts;
 use sp1_core_machine::io::SP1Stdin;
-use sp1_hypercube::{septic_digest::SepticDigest, MachineVerifyingKey};
+use sp1_hypercube::{septic_digest::SepticDigest, MachineVerifyingKey, UntrustedConfig};
 use sp1_primitives::{Elf, SP1Field};
 use sp1_prover::{
     worker::{
@@ -73,7 +73,7 @@ async fn execute_node(args: Args, elf: Vec<u8>, stdin: SP1Stdin) {
         pc_start: [SP1Field::zero(); 3],
         initial_global_cumulative_sum: SepticDigest::zero(),
         preprocessed_commit: [SP1Field::zero(); 8],
-        enable_untrusted_programs: SP1Field::zero(),
+        untrusted_config: UntrustedConfig::zero(),
     };
     let dummy_vk = SP1VerifyingKey { vk: dummy_vk };
 

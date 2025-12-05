@@ -357,22 +357,145 @@ where
         let local = main.row_slice(0);
         let local: &WeierstrassAddAssignCols<AB::Var, E::BaseField, M> = (*local).borrow();
 
+        let mut is_not_trap = local.is_real.into();
+        let mut trap_code = AB::Expr::zero();
+
+        if !M::IS_TRUSTED {
+            let local = main.row_slice(0);
+            let local: &WeierstrassAddAssignCols<AB::Var, E::BaseField, UserMode> =
+                (*local).borrow();
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into(),
+                &local.q_ptr.addr.map(Into::into),
+                &local.q_addrs[local.q_addrs.len() - 1].value.map(Into::into),
+                PROT_READ,
+                &local.read_slice_page_prot_access,
+                &mut is_not_trap,
+                &mut trap_code,
+            );
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into() + AB::Expr::one(),
+                &local.p_ptr.addr.map(Into::into),
+                &local.p_addrs[local.p_addrs.len() - 1].value.map(Into::into),
+                PROT_READ | PROT_WRITE,
+                &local.write_slice_page_prot_access,
+                &mut is_not_trap,
+                &mut trap_code,
+            );
+        }
+
+        let p_ptr = SyscallAddrOperation::<AB::F>::eval(
+            builder,
+            E::NB_LIMBS as u32 * 2,
+            local.p_ptr,
+            local.is_real.into(),
+        );
+        let q_ptr = SyscallAddrOperation::<AB::F>::eval(
+            builder,
+            E::NB_LIMBS as u32 * 2,
+            local.q_ptr,
+            local.is_real.into(),
+        );
+
+        let modulus = E::BaseField::to_limbs_field::<AB::Expr, AB::F>(&E::BaseField::modulus());
+        local.x3_range.eval(builder, &local.x3_ins.result, &modulus, local.is_real);
+        local.y3_range.eval(builder, &local.y3_ins.result, &modulus, local.is_real);
+
+        let x3_result_words = limbs_to_words::<AB>(local.x3_ins.result.0.to_vec());
+        let y3_result_words = limbs_to_words::<AB>(local.y3_ins.result.0.to_vec());
+        let result_words = x3_result_words.into_iter().chain(y3_result_words).collect_vec();
+
+        // Fetch the syscall id for the curve type.
+        let syscall_id_felt = match E::CURVE_TYPE {
+            CurveType::Secp256k1 => {
+                AB::F::from_canonical_u32(SyscallCode::SECP256K1_ADD.syscall_id())
+            }
+            CurveType::Secp256r1 => {
+                AB::F::from_canonical_u32(SyscallCode::SECP256R1_ADD.syscall_id())
+            }
+            CurveType::Bn254 => AB::F::from_canonical_u32(SyscallCode::BN254_ADD.syscall_id()),
+            CurveType::Bls12381 => {
+                AB::F::from_canonical_u32(SyscallCode::BLS12381_ADD.syscall_id())
+            }
+            _ => panic!("Unsupported curve"),
+        };
+
+        builder.eval_memory_access_slice_read(
+            local.clk_high,
+            local.clk_low.into(),
+            &local.q_addrs.iter().map(|addr| addr.value.map(Into::into)).collect::<Vec<_>>(),
+            &local.q_access.iter().map(|access| access.memory_access).collect_vec(),
+            is_not_trap.clone(),
+        );
+        builder.eval_memory_access_slice_write(
+            local.clk_high,
+            local.clk_low + AB::Expr::one(),
+            &local.p_addrs.iter().map(|addr| addr.value.map(Into::into)).collect::<Vec<_>>(),
+            &local.p_access.iter().map(|access| access.memory_access).collect_vec(),
+            result_words,
+            is_not_trap.clone(),
+        );
+
+        builder.receive_syscall(
+            local.clk_high,
+            local.clk_low.into(),
+            syscall_id_felt,
+            trap_code,
+            p_ptr.map(Into::into),
+            q_ptr.map(Into::into),
+            local.is_real,
+            InteractionScope::Local,
+        );
+
+        // p_addrs[i] = p_ptr + 8 * i
+        for i in 0..local.p_addrs.len() {
+            AddrAddOperation::<AB::F>::eval(
+                builder,
+                Word([p_ptr[0].into(), p_ptr[1].into(), p_ptr[2].into(), AB::Expr::zero()]),
+                Word::from(8 * i as u64),
+                local.p_addrs[i],
+                local.is_real.into(),
+            );
+        }
+
+        // q_addrs[i] = q_ptr + 8 * i
+        for i in 0..local.q_addrs.len() {
+            AddrAddOperation::<AB::F>::eval(
+                builder,
+                Word([q_ptr[0].into(), q_ptr[1].into(), q_ptr[2].into(), AB::Expr::zero()]),
+                Word::from(8 * i as u64),
+                local.q_addrs[i],
+                local.is_real.into(),
+            );
+        }
+
+        builder.assert_eq(
+            builder.extract_public_values().is_untrusted_programs_enabled,
+            AB::Expr::from_bool(!M::IS_TRUSTED),
+        );
+
         let num_words_field_element = <E::BaseField as NumLimbs>::Limbs::USIZE / 8;
 
         let p_x_limbs = builder
-            .generate_limbs(&local.p_access[0..num_words_field_element], local.is_real.into());
+            .generate_limbs(&local.p_access[0..num_words_field_element], is_not_trap.clone());
         let p_x: Limbs<AB::Expr, <E::BaseField as NumLimbs>::Limbs> =
             Limbs(p_x_limbs.try_into().expect("failed to convert limbs"));
-        let p_y_limbs = builder
-            .generate_limbs(&local.p_access[num_words_field_element..], local.is_real.into());
+        let p_y_limbs =
+            builder.generate_limbs(&local.p_access[num_words_field_element..], is_not_trap.clone());
         let p_y: Limbs<AB::Expr, <E::BaseField as NumLimbs>::Limbs> =
             Limbs(p_y_limbs.try_into().expect("failed to convert limbs"));
         let q_x_limbs = builder
-            .generate_limbs(&local.q_access[0..num_words_field_element], local.is_real.into());
+            .generate_limbs(&local.q_access[0..num_words_field_element], is_not_trap.clone());
         let q_x: Limbs<AB::Expr, <E::BaseField as NumLimbs>::Limbs> =
             Limbs(q_x_limbs.try_into().expect("failed to convert limbs"));
-        let q_y_limbs = builder
-            .generate_limbs(&local.q_access[num_words_field_element..], local.is_real.into());
+        let q_y_limbs =
+            builder.generate_limbs(&local.q_access[num_words_field_element..], is_not_trap.clone());
         let q_y: Limbs<AB::Expr, <E::BaseField as NumLimbs>::Limbs> =
             Limbs(q_y_limbs.try_into().expect("failed to convert limbs"));
 
@@ -443,123 +566,6 @@ where
                 local.is_real,
             );
         }
-
-        let modulus = E::BaseField::to_limbs_field::<AB::Expr, AB::F>(&E::BaseField::modulus());
-        local.x3_range.eval(builder, &local.x3_ins.result, &modulus, local.is_real);
-        local.y3_range.eval(builder, &local.y3_ins.result, &modulus, local.is_real);
-
-        let x3_result_words = limbs_to_words::<AB>(local.x3_ins.result.0.to_vec());
-        let y3_result_words = limbs_to_words::<AB>(local.y3_ins.result.0.to_vec());
-        let result_words = x3_result_words.into_iter().chain(y3_result_words).collect_vec();
-
-        let p_ptr = SyscallAddrOperation::<AB::F>::eval(
-            builder,
-            E::NB_LIMBS as u32 * 2,
-            local.p_ptr,
-            local.is_real.into(),
-        );
-        let q_ptr = SyscallAddrOperation::<AB::F>::eval(
-            builder,
-            E::NB_LIMBS as u32 * 2,
-            local.q_ptr,
-            local.is_real.into(),
-        );
-
-        // p_addrs[i] = p_ptr + 8 * i
-        for i in 0..local.p_addrs.len() {
-            AddrAddOperation::<AB::F>::eval(
-                builder,
-                Word([p_ptr[0].into(), p_ptr[1].into(), p_ptr[2].into(), AB::Expr::zero()]),
-                Word::from(8 * i as u64),
-                local.p_addrs[i],
-                local.is_real.into(),
-            );
-        }
-
-        // q_addrs[i] = q_ptr + 8 * i
-        for i in 0..local.q_addrs.len() {
-            AddrAddOperation::<AB::F>::eval(
-                builder,
-                Word([q_ptr[0].into(), q_ptr[1].into(), q_ptr[2].into(), AB::Expr::zero()]),
-                Word::from(8 * i as u64),
-                local.q_addrs[i],
-                local.is_real.into(),
-            );
-        }
-
-        builder.eval_memory_access_slice_read(
-            local.clk_high,
-            local.clk_low.into(),
-            &local.q_addrs.iter().map(|addr| addr.value.map(Into::into)).collect::<Vec<_>>(),
-            &local.q_access.iter().map(|access| access.memory_access).collect_vec(),
-            local.is_real,
-        );
-        builder.eval_memory_access_slice_write(
-            local.clk_high,
-            local.clk_low + AB::Expr::one(),
-            &local.p_addrs.iter().map(|addr| addr.value.map(Into::into)).collect::<Vec<_>>(),
-            &local.p_access.iter().map(|access| access.memory_access).collect_vec(),
-            result_words,
-            local.is_real,
-        );
-
-        // Fetch the syscall id for the curve type.
-        let syscall_id_felt = match E::CURVE_TYPE {
-            CurveType::Secp256k1 => {
-                AB::F::from_canonical_u32(SyscallCode::SECP256K1_ADD.syscall_id())
-            }
-            CurveType::Secp256r1 => {
-                AB::F::from_canonical_u32(SyscallCode::SECP256R1_ADD.syscall_id())
-            }
-            CurveType::Bn254 => AB::F::from_canonical_u32(SyscallCode::BN254_ADD.syscall_id()),
-            CurveType::Bls12381 => {
-                AB::F::from_canonical_u32(SyscallCode::BLS12381_ADD.syscall_id())
-            }
-            _ => panic!("Unsupported curve"),
-        };
-
-        builder.receive_syscall(
-            local.clk_high,
-            local.clk_low.into(),
-            syscall_id_felt,
-            p_ptr.map(Into::into),
-            q_ptr.map(Into::into),
-            local.is_real,
-            InteractionScope::Local,
-        );
-
-        builder.assert_eq(
-            builder.extract_public_values().is_untrusted_programs_enabled,
-            AB::Expr::from_bool(!M::IS_TRUSTED),
-        );
-
-        if !M::IS_TRUSTED {
-            let local = main.row_slice(0);
-            let local: &WeierstrassAddAssignCols<AB::Var, E::BaseField, UserMode> =
-                (*local).borrow();
-
-            AddressSlicePageProtOperation::<AB::F>::eval(
-                builder,
-                local.clk_high.into(),
-                local.clk_low.into(),
-                &local.q_ptr.addr.map(Into::into),
-                &local.q_addrs[local.q_addrs.len() - 1].value.map(Into::into),
-                AB::Expr::from_canonical_u8(PROT_READ),
-                &local.read_slice_page_prot_access,
-                local.is_real.into(),
-            );
-
-            AddressSlicePageProtOperation::<AB::F>::eval(
-                builder,
-                local.clk_high.into(),
-                local.clk_low.into() + AB::Expr::one(),
-                &local.p_ptr.addr.map(Into::into),
-                &local.p_addrs[local.p_addrs.len() - 1].value.map(Into::into),
-                AB::Expr::from_canonical_u8(PROT_READ | PROT_WRITE),
-                &local.write_slice_page_prot_access,
-                local.is_real.into(),
-            );
-        }
     }
 }
 
@@ -572,10 +578,19 @@ impl<E: EllipticCurve, M: TrustMode> WeierstrassAddAssignChip<E, M> {
         // Decode affine points.
         let p = &event.p;
         let q = &event.q;
-        let p = AffinePoint::<E>::from_words_le(p);
-        let (p_x, p_y) = (p.x, p.y);
-        let q = AffinePoint::<E>::from_words_le(q);
-        let (q_x, q_y) = (q.x, q.y);
+
+        let (p_x, p_y) = if p.is_empty() {
+            (BigUint::zero(), BigUint::zero())
+        } else {
+            let p = AffinePoint::<E>::from_words_le(p);
+            (p.x, p.y)
+        };
+        let (q_x, q_y) = if q.is_empty() {
+            (BigUint::one(), BigUint::one())
+        } else {
+            let q = AffinePoint::<E>::from_words_le(q);
+            (q.x, q.y)
+        };
 
         // Populate basic columns.
         cols.is_real = F::one();
@@ -587,17 +602,8 @@ impl<E: EllipticCurve, M: TrustMode> WeierstrassAddAssignChip<E, M> {
 
         Self::populate_field_ops(new_byte_lookup_events, cols, p_x, p_y, q_x, q_y);
 
-        // Populate the memory access columns.
-        for i in 0..cols.q_access.len() {
-            let record = MemoryRecordEnum::Read(event.q_memory_records[i]);
-            cols.q_access[i].populate(record, new_byte_lookup_events);
-            cols.q_addrs[i].populate(new_byte_lookup_events, event.q_ptr, 8 * i as u64);
-        }
-        for i in 0..cols.p_access.len() {
-            let record = MemoryRecordEnum::Write(event.p_memory_records[i]);
-            cols.p_access[i].populate(record, new_byte_lookup_events);
-            cols.p_addrs[i].populate(new_byte_lookup_events, event.p_ptr, 8 * i as u64);
-        }
+        let mut is_not_trap = true;
+        let mut trap_code = 0u8;
 
         if !M::IS_TRUSTED {
             let cols: &mut WeierstrassAddAssignCols<F, E::BaseField, UserMode> =
@@ -608,9 +614,9 @@ impl<E: EllipticCurve, M: TrustMode> WeierstrassAddAssignChip<E, M> {
                 event.q_ptr + 8 * (cols.q_addrs.len() - 1) as u64,
                 event.clk,
                 PROT_READ,
-                &event.page_prot_records.read_page_prot_records[0],
-                &event.page_prot_records.read_page_prot_records.get(1).copied(),
-                1,
+                &event.page_prot_records.read_page_prot_records,
+                &mut is_not_trap,
+                &mut trap_code,
             );
 
             cols.write_slice_page_prot_access.populate(
@@ -619,10 +625,43 @@ impl<E: EllipticCurve, M: TrustMode> WeierstrassAddAssignChip<E, M> {
                 event.p_ptr + 8 * (cols.p_addrs.len() - 1) as u64,
                 event.clk + 1,
                 PROT_READ | PROT_WRITE,
-                &event.page_prot_records.write_page_prot_records[0],
-                &event.page_prot_records.write_page_prot_records.get(1).copied(),
-                1,
+                &event.page_prot_records.write_page_prot_records,
+                &mut is_not_trap,
+                &mut trap_code,
             );
+        }
+
+        let dummy_memory_record = MemoryRecordEnum::Read(MemoryReadRecord {
+            value: 1,
+            timestamp: 1,
+            prev_timestamp: 0,
+            prev_page_prot_record: None,
+        });
+
+        // Populate the memory access columns.
+        for i in 0..cols.q_access.len() {
+            cols.q_addrs[i].populate(new_byte_lookup_events, event.q_ptr, 8 * i as u64);
+            if is_not_trap {
+                let record = MemoryRecordEnum::Read(event.q_memory_records[i]);
+                cols.q_access[i].populate(record, new_byte_lookup_events);
+            } else {
+                cols.q_access[i] = MemoryAccessColsU8::default();
+            }
+        }
+        for i in 0..cols.p_access.len() {
+            cols.p_addrs[i].populate(new_byte_lookup_events, event.p_ptr, 8 * i as u64);
+            if is_not_trap {
+                let record = MemoryRecordEnum::Write(event.p_memory_records[i]);
+                cols.p_access[i].populate(record, new_byte_lookup_events);
+            } else {
+                cols.p_access[i] = MemoryAccessColsU8::default();
+            }
+        }
+
+        if !is_not_trap {
+            let num_words_field_element = E::BaseField::NB_LIMBS / 8;
+            cols.q_access[0].populate(dummy_memory_record, &mut vec![]);
+            cols.q_access[num_words_field_element].populate(dummy_memory_record, &mut vec![]);
         }
     }
 }

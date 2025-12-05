@@ -481,6 +481,7 @@ mod tests {
     };
 
     #[tokio::test]
+    #[cfg(feature = "experimental")]
     #[ignore = "should be invoked when changing the wrap circuit"]
     async fn set_wrap_vk_and_wrapped_proof() {
         setup_logger();
@@ -488,10 +489,12 @@ mod tests {
         let elf = test_artifacts::FIBONACCI_ELF;
 
         tracing::info!("initializing prover");
-        let client = SP1LocalNodeBuilder::from_worker_client_builder(cpu_worker_builder())
-            .build()
-            .await
-            .expect("failed to build client");
+        let client = SP1LocalNodeBuilder::from_worker_client_builder(
+            cpu_worker_builder().without_vk_verification(),
+        )
+        .build()
+        .await
+        .expect("failed to build client");
 
         tracing::info!("prove compressed");
         let stdin = sp1_core_machine::io::SP1Stdin::new();
@@ -515,14 +518,17 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "experimental")]
     async fn test_wrap_vk() {
         setup_logger();
 
         tracing::info!("initializing prover");
-        let client = SP1LocalNodeBuilder::from_worker_client_builder(cpu_worker_builder())
-            .build()
-            .await
-            .expect("failed to build client");
+        let client = SP1LocalNodeBuilder::from_worker_client_builder(
+            cpu_worker_builder().without_vk_verification(),
+        )
+        .build()
+        .await
+        .expect("failed to build client");
 
         // Check that the wrap vk is the same as the one included in the binary.
         let client_wrap_vk = client.wrap_vk().clone();

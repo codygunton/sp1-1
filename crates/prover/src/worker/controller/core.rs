@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use slop_futures::pipeline::Pipeline;
 use sp1_core_executor::{
     events::{MemoryInitializeFinalizeEvent, MemoryRecord, PageProtInitializeFinalizeEvent},
-    CoreVM, ExecutionError, MinimalExecutor, Program, SP1CoreOpts, SyscallCode, UnsafeMemory,
+    CoreVM, ExecutionError, ExecutionMode, GasEstimatingVMEnum, MinimalExecutorEnum, Program,
+    SP1CoreOpts, SplicingVMEnum, SyscallCode, UnsafeMemory,
 };
 use sp1_core_machine::{executor::ExecutionOutput, io::SP1Stdin};
 use sp1_hypercube::{
@@ -145,8 +146,8 @@ where
             )))
         })?);
 
-        // Initialize the touched addresses map.
-        let (all_touched_addresses, global_memory_handler) =
+        // Initialize the touched addresses and pages maps.
+        let (all_touched_addresses, all_touched_pages, global_memory_handler) =
             global_memory(self.global_memory_buffer_size);
         let (deferred_marker_tx, precompile_handler) = precompile_channel(&program, &opts);
         // Initialize the final vm state.
@@ -158,7 +159,7 @@ where
 
         // Start the minimal executor.
         let (memory_tx, memory_rx) = oneshot::channel::<UnsafeMemory>();
-        let (minimal_executor_tx, minimal_executor_rx) = oneshot::channel::<MinimalExecutor>();
+        let (minimal_executor_tx, minimal_executor_rx) = oneshot::channel::<MinimalExecutorEnum>();
         let (output_tx, output_rx) = oneshot::channel::<ExecutionOutput>();
         // Create a channel to send the splicing handles to be awaited and their task_ids being
         // sent after being submitted to the splicing pipeline.
@@ -172,10 +173,18 @@ where
                 tracing::info!("minimal executor cache hit");
                 minimal_executor
             } else {
-                MinimalExecutor::tracing(program.clone(), opts.minimal_trace_chunk_threshold)
+                MinimalExecutorEnum::new(
+                    program.clone(),
+                    true,
+                    Some(opts.minimal_trace_chunk_threshold),
+                )
             }
         } else {
-            MinimalExecutor::tracing(program.clone(), opts.minimal_trace_chunk_threshold)
+            MinimalExecutorEnum::new(
+                program.clone(),
+                true,
+                Some(opts.minimal_trace_chunk_threshold),
+            )
         };
         join_set.spawn_blocking({
             let program = program.clone();
@@ -233,6 +242,7 @@ where
                         common_input_artifact: common_input_artifact.clone(),
                         num_deferred_proofs: self.num_deferred_proofs,
                         all_touched_addresses: all_touched_addresses.clone(),
+                        all_touched_pages: all_touched_pages.clone(),
                         final_vm_state: final_vm_state.clone(),
                         prove_shard_tx: sender.clone(),
                         context: context.clone(),
@@ -385,7 +395,7 @@ pub struct FinalVmState {
 }
 
 impl FinalVmState {
-    pub fn new<'a, 'b>(vm: &'a CoreVM<'b>) -> Self {
+    pub fn new<'a, 'b, M: ExecutionMode>(vm: &'a CoreVM<'b, M>) -> Self {
         let registers = *vm.registers();
         let timestamp = vm.clk();
         let pc = vm.pc();
@@ -394,6 +404,28 @@ impl FinalVmState {
         let proof_nonce = vm.proof_nonce;
 
         Self { registers, timestamp, pc, exit_code, public_value_digest, proof_nonce }
+    }
+
+    pub fn from_splicing_vm_enum(vm: &SplicingVMEnum<'_>) -> Self {
+        Self {
+            registers: vm.registers(),
+            timestamp: vm.clk(),
+            pc: vm.pc(),
+            exit_code: vm.exit_code(),
+            public_value_digest: vm.public_value_digest(),
+            proof_nonce: vm.proof_nonce(),
+        }
+    }
+
+    pub fn from_gas_estimating_vm_enum(vm: &GasEstimatingVMEnum<'_>) -> Self {
+        Self {
+            registers: vm.registers(),
+            timestamp: vm.clk(),
+            pc: vm.pc(),
+            exit_code: vm.exit_code(),
+            public_value_digest: vm.public_value_digest(),
+            proof_nonce: vm.proof_nonce(),
+        }
     }
 }
 

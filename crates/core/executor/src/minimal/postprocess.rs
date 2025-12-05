@@ -2,12 +2,12 @@ use hashbrown::HashSet;
 
 use crate::{
     events::{MemoryInitializeFinalizeEvent, MemoryRecord, PageProtInitializeFinalizeEvent},
-    ExecutionRecord, MinimalExecutor,
+    ExecutionMode, ExecutionRecord, MinimalExecutor,
 };
 
 use sp1_primitives::consts::DEFAULT_PAGE_PROT;
 
-impl MinimalExecutor {
+impl<M: ExecutionMode> MinimalExecutor<M> {
     /// Postprocess into an existing [`ExecutionRecord`],
     /// consisting of all the [`MemoryInitializeFinalizeEvent`]s.
     #[tracing::instrument(name = "emit globals", skip_all)]
@@ -16,6 +16,7 @@ impl MinimalExecutor {
         record: &mut ExecutionRecord,
         final_registers: [MemoryRecord; 32],
         mut touched_addresses: HashSet<u64>,
+        mut touched_pages: HashSet<u64>,
     ) {
         // Add all the finalize addresses to the touched addresses.
         touched_addresses.extend(self.program().memory_image.keys().copied());
@@ -70,17 +71,17 @@ impl MinimalExecutor {
             ));
         }
 
-        if self.program().enable_untrusted_programs {
-            let page_prots = self.get_page_prot();
+        if M::PAGE_PROTECTION_ENABLED {
+            touched_pages.extend(self.program().page_prot_image.keys().copied());
 
             let page_prot_initialize_events = &mut record.global_page_prot_initialize_events;
-            page_prot_initialize_events.reserve_exact(page_prots.len());
+            page_prot_initialize_events.reserve_exact(touched_pages.len());
 
             let page_prot_finalize_events = &mut record.global_page_prot_finalize_events;
-            page_prot_finalize_events.reserve_exact(page_prots.len());
+            page_prot_finalize_events.reserve_exact(touched_pages.len());
 
-            for page_idx in page_prots.keys() {
-                let record = page_prots.get(*page_idx).unwrap();
+            for page_idx in &touched_pages {
+                let record = self.get_page_prot_record(*page_idx).unwrap();
 
                 // Only push initialize event if the page prot idx is not in the initial page
                 // prot image.
@@ -98,8 +99,7 @@ impl MinimalExecutor {
                 });
             }
         } else {
-            let page_prots = self.get_page_prot();
-            assert!(page_prots.is_empty());
+            assert!(touched_pages.is_empty());
         }
     }
 

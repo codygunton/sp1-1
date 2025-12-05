@@ -8,12 +8,14 @@ use crate::{
         },
         syscall::{sp1_ecall_handler, SyscallRuntime},
     },
-    ExecutionError, Instruction, Opcode, Program, Register, RetainedEventsPreset, SP1CoreOpts,
-    SyscallCode, CLK_INC as CLK_INC_32, HALT_PC, PC_INC as PC_INC_32,
+    ExecutionError, ExecutionMode, Instruction, Opcode, Program, Register, RetainedEventsPreset,
+    SP1CoreOpts, SupervisorMode, SyscallCode, TrapError, UserMode, CLK_INC as CLK_INC_32, HALT_PC,
+    PC_INC as PC_INC_32,
 };
 use hashbrown::HashMap;
+use results::{LoadResultSupervisor, StoreResultSupervisor};
 use rrs_lib::process_instruction;
-use std::{mem::MaybeUninit, num::Wrapping, ptr::addr_of_mut, sync::Arc};
+use std::{marker::PhantomData, mem::MaybeUninit, num::Wrapping, ptr::addr_of_mut, sync::Arc};
 
 use sp1_hypercube::air::{PROOF_NONCE_NUM_WORDS, PV_DIGEST_NUM_WORDS};
 use sp1_jit::{MemReads, MinimalTrace};
@@ -29,7 +31,9 @@ const CLK_INC: u64 = CLK_INC_32 as u64;
 const PC_INC: u64 = PC_INC_32 as u64;
 
 /// A RISC-V VM that uses a [`MinimalTrace`] to oracle memory & page permission access.
-pub struct CoreVM<'a> {
+///
+/// The type parameter `M` determines whether page protection checks are enabled.
+pub struct CoreVM<'a, M: ExecutionMode> {
     registers: [MemoryRecord; 32],
     /// The current clock of the VM.
     clk: u64,
@@ -63,9 +67,11 @@ pub struct CoreVM<'a> {
     transpiler: InstructionTranspiler,
     /// Decoded instruction cache
     decoded_instruction_cache: HashMap<u32, Instruction>,
+    /// Phantom data for the execution mode
+    _mode: PhantomData<M>,
 }
 
-impl<'a> CoreVM<'a> {
+impl<'a, M: ExecutionMode> CoreVM<'a, M> {
     /// Create a [`CoreVM`] from a [`MinimalTrace`] and a [`Program`].
     pub fn new<T: MinimalTrace>(
         trace: &'a T,
@@ -123,45 +129,7 @@ impl<'a> CoreVM<'a> {
             proof_nonce,
             transpiler: InstructionTranspiler,
             decoded_instruction_cache: HashMap::new(),
-        }
-    }
-
-    /// Fetch the next instruction from the program.
-    #[inline]
-    pub fn fetch(&mut self) -> Result<FetchResult, ExecutionError> {
-        if let Some(instruction) = self.program.fetch(self.pc) {
-            Ok(FetchResult { pc: self.pc, instruction: Some(*instruction), mr_record: None })
-        } else if self.program.enable_untrusted_programs {
-            let aligned_pc = self.pc & !0b111;
-            let mr_record = self.mr_instr(
-                aligned_pc,
-                PROT_READ | PROT_EXEC,
-                Some(MemoryAccessPosition::UntrustedInstruction),
-            )?;
-            let word = mr_record.value;
-            if !self.pc.is_multiple_of(4) {
-                return Err(ExecutionError::InvalidMemoryAccessUntrustedProgram(self.pc));
-            }
-            let aligned_offset = self.pc - aligned_pc;
-            let instruction_value: u32 =
-                (word >> (aligned_offset * 8) & 0xffffffff).try_into().unwrap();
-            let instruction = if let Some(cached_instruction) =
-                self.decoded_instruction_cache.get(&instruction_value)
-            {
-                *cached_instruction
-            } else {
-                let instruction =
-                    process_instruction(&mut self.transpiler, instruction_value).unwrap();
-                self.decoded_instruction_cache.insert(instruction_value, instruction);
-                instruction
-            };
-            Ok(FetchResult {
-                pc: self.pc,
-                instruction: Some(instruction),
-                mr_record: Some(mr_record),
-            })
-        } else {
-            Ok(FetchResult { pc: self.pc, instruction: None, mr_record: None })
+            _mode: PhantomData,
         }
     }
 
@@ -170,8 +138,9 @@ impl<'a> CoreVM<'a> {
     /// when trapping is enabled, page permission faults simply traps. This
     /// method shall be called before +advance+ to give the VM a chance to
     /// handle some errors.
-    pub fn handle_error(&mut self, e: ExecutionError) -> Result<TrapResult, ExecutionError> {
-        if let ExecutionError::PagePermissionViolation(code) = e {
+    pub fn handle_error(&mut self, e: TrapError) -> Result<TrapResult, ExecutionError> {
+        #[allow(irrefutable_let_patterns)]
+        if let TrapError::PagePermissionViolation(code) = e {
             if let Some(trap_context_address) = self.program.trap_context {
                 // As discussed in MinimalExecutor, page permissions are ignored
                 // when handling traps
@@ -189,7 +158,7 @@ impl<'a> CoreVM<'a> {
                 });
             }
         }
-        Err(e)
+        Err(ExecutionError::UnhandledTrap(e))
     }
 
     #[inline]
@@ -218,121 +187,6 @@ impl<'a> CoreVM<'a> {
         CycleResult::Done(false)
     }
 
-    /// Execute a load instruction.
-    #[inline]
-    pub fn execute_load(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<LoadResult, ExecutionError> {
-        let (rd, rs1, imm) = instruction.i_type();
-
-        let rr_record = self.rr(rs1, Some(MemoryAccessPosition::B));
-        let b = rr_record.value;
-
-        // Compute the address.
-        let addr = b.wrapping_add(imm);
-        let mr_record = self.mr_instr(addr, PROT_READ, Some(MemoryAccessPosition::Memory))?;
-        let word = mr_record.value;
-
-        let a = match instruction.opcode {
-            Opcode::LB => ((word >> ((addr % 8) * 8)) & 0xFF) as i8 as i64 as u64,
-            Opcode::LH => {
-                if !addr.is_multiple_of(2) {
-                    return Err(ExecutionError::InvalidMemoryAccess(Opcode::LH, addr));
-                }
-
-                ((word >> (((addr / 2) % 4) * 16)) & 0xFFFF) as i16 as i64 as u64
-            }
-            Opcode::LW => {
-                if !addr.is_multiple_of(4) {
-                    return Err(ExecutionError::InvalidMemoryAccess(Opcode::LW, addr));
-                }
-
-                ((word >> (((addr / 4) % 2) * 32)) & 0xFFFFFFFF) as i32 as u64
-            }
-            Opcode::LBU => ((word >> ((addr % 8) * 8)) & 0xFF) as u8 as u64,
-            Opcode::LHU => {
-                if !addr.is_multiple_of(2) {
-                    return Err(ExecutionError::InvalidMemoryAccess(Opcode::LHU, addr));
-                }
-
-                ((word >> (((addr / 2) % 4) * 16)) & 0xFFFF) as u16 as u64
-            }
-            // RISCV-64
-            Opcode::LWU => {
-                if !addr.is_multiple_of(4) {
-                    return Err(ExecutionError::InvalidMemoryAccess(Opcode::LWU, addr));
-                }
-
-                (word >> (((addr / 4) % 2) * 32)) & 0xFFFFFFFF
-            }
-            Opcode::LD => {
-                if !addr.is_multiple_of(8) {
-                    return Err(ExecutionError::InvalidMemoryAccess(Opcode::LD, addr));
-                }
-
-                word
-            }
-            _ => unreachable!("Invalid opcode for `execute_load`: {:?}", instruction.opcode),
-        };
-
-        let rw_record = self.rw(rd, a);
-
-        Ok(LoadResult { a, b, c: imm, addr, rs1, rd, rr_record, rw_record, mr_record })
-    }
-
-    /// Execute a store instruction.
-    #[inline]
-    pub fn execute_store(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<StoreResult, ExecutionError> {
-        let (rs1, rs2, imm) = instruction.s_type();
-
-        let c = imm;
-        let rs2_record = self.rr(rs2, Some(MemoryAccessPosition::B));
-        let rs1_record = self.rr(rs1, Some(MemoryAccessPosition::A));
-
-        let b = rs2_record.value;
-        let a = rs1_record.value;
-        let addr = b.wrapping_add(c);
-        let mut mw_record = self.mw_instr(addr, Some(MemoryAccessPosition::Memory))?;
-        let word = mw_record.prev_value;
-
-        let memory_store_value = match instruction.opcode {
-            Opcode::SB => {
-                let shift = (addr % 8) * 8;
-                ((a & 0xFF) << shift) | (word & !(0xFF << shift))
-            }
-            Opcode::SH => {
-                if !addr.is_multiple_of(2) {
-                    return Err(ExecutionError::InvalidMemoryAccess(Opcode::SH, addr));
-                }
-                let shift = ((addr / 2) % 4) * 16;
-                ((a & 0xFFFF) << shift) | (word & !(0xFFFF << shift))
-            }
-            Opcode::SW => {
-                if !addr.is_multiple_of(4) {
-                    return Err(ExecutionError::InvalidMemoryAccess(Opcode::SW, addr));
-                }
-                let shift = ((addr / 4) % 2) * 32;
-                ((a & 0xFFFFFFFF) << shift) | (word & !(0xFFFFFFFF << shift))
-            }
-            // RISCV-64
-            Opcode::SD => {
-                if !addr.is_multiple_of(8) {
-                    return Err(ExecutionError::InvalidMemoryAccess(Opcode::SD, addr));
-                }
-                a
-            }
-            _ => unreachable!(),
-        };
-
-        mw_record.value = memory_store_value;
-
-        Ok(StoreResult { a, b, c, addr, rs1, rs1_record, rs2, rs2_record, mw_record })
-    }
-
     /// Execute an ALU instruction.
     #[inline]
     #[allow(clippy::too_many_lines)]
@@ -342,8 +196,8 @@ impl<'a> CoreVM<'a> {
 
         let (rd, b, c) = if !instruction.imm_c {
             let (rd, rs1, rs2) = instruction.r_type();
-            let c = self.rr(rs2, Some(MemoryAccessPosition::C));
-            let b = self.rr(rs1, Some(MemoryAccessPosition::B));
+            let c = self.rr(rs2, MemoryAccessPosition::C);
+            let b = self.rr(rs1, MemoryAccessPosition::B);
 
             // SAFETY: We're writing to a valid pointer as we just created the pointer from the
             // `result`.
@@ -353,7 +207,7 @@ impl<'a> CoreVM<'a> {
             (rd, b.value, c.value)
         } else if !instruction.imm_b && instruction.imm_c {
             let (rd, rs1, imm) = instruction.i_type();
-            let (rd, b, c) = (rd, self.rr(rs1, Some(MemoryAccessPosition::B)), imm);
+            let (rd, b, c) = (rd, self.rr(rs1, MemoryAccessPosition::B), imm);
 
             // SAFETY: We're writing to a valid pointer as we just created the pointer from the
             // `result`.
@@ -504,7 +358,7 @@ impl<'a> CoreVM<'a> {
             Opcode::JALR => {
                 let (rd, rs1, c) = instruction.i_type();
                 let imm_se = sign_extend_imm(c, 12);
-                let b_record = self.rr(rs1, Some(MemoryAccessPosition::B));
+                let b_record = self.rr(rs1, MemoryAccessPosition::B);
                 let a = self.pc.wrapping_add(4);
 
                 // Calculate next PC: (rs1 + imm) & ~1
@@ -531,8 +385,8 @@ impl<'a> CoreVM<'a> {
         let (rs1, rs2, imm) = instruction.b_type();
 
         let c = imm;
-        let b_record = self.rr(rs2, Some(MemoryAccessPosition::B));
-        let a_record = self.rr(rs1, Some(MemoryAccessPosition::A));
+        let b_record = self.rr(rs2, MemoryAccessPosition::B);
+        let a_record = self.rr(rs1, MemoryAccessPosition::A);
 
         let a = a_record.value;
         let b = b_record.value;
@@ -579,7 +433,7 @@ impl<'a> CoreVM<'a> {
         _code: SyscallCode,
     ) -> Result<EcallResult, ExecutionError>
     where
-        RT: SyscallRuntime<'a>,
+        RT: SyscallRuntime<'a, M>,
     {
         if !instruction.is_ecall_instruction() {
             unreachable!("Invalid opcode for `execute_ecall`: {:?}", instruction.opcode);
@@ -594,31 +448,54 @@ impl<'a> CoreVM<'a> {
         let syscall_id = core.registers[t0 as usize].value;
         let code = SyscallCode::from_u32(syscall_id as u32);
 
-        let c_record = core.rr(Register::X11, Some(MemoryAccessPosition::C));
-        let b_record = core.rr(Register::X10, Some(MemoryAccessPosition::B));
+        let c_record = core.rr(Register::X11, MemoryAccessPosition::C);
+        let b_record = core.rr(Register::X10, MemoryAccessPosition::B);
         let c = c_record.value;
         let b = b_record.value;
+
+        let is_sigreturn = code == SyscallCode::SIG_RETURN;
+
+        let mut a_record: MemoryWriteRecord = MemoryWriteRecord::default();
+        if is_sigreturn {
+            a_record = core.rw(Register::X5, syscall_id);
+        }
+
+        let sig_return_pc_record = if is_sigreturn {
+            let record = core.mr_without_prot(b);
+            core.set_next_pc(record.value);
+            Some(record)
+        } else {
+            None
+        };
 
         // The only way unconstrained mode interacts with the parts of the program that proven is
         // via hints, this means during tracing and splicing, we can just "skip" the whole
         // set of unconstrained cycles, and rely on the fact that the hints are already
         // apart of the minimal trace.
-        let a = if code == SyscallCode::ENTER_UNCONSTRAINED {
-            0
+        let (a, error) = if code == SyscallCode::ENTER_UNCONSTRAINED {
+            (0, None)
         } else {
-            sp1_ecall_handler(rt, code, b, c)?.unwrap_or(code as u64)
+            let result = sp1_ecall_handler(rt, code, b, c);
+            if is_sigreturn {
+                (code as u64, None)
+            } else if let Ok(ret) = result {
+                (ret.unwrap_or(code as u64), None)
+            } else {
+                (code as u64, result.err())
+            }
         };
 
         // Bad borrow checker!
         let core = rt.core_mut();
 
-        // Read the code from the x5 register.
-        let a_record = core.rw(Register::X5, a);
+        if !is_sigreturn {
+            a_record = core.rw(Register::X5, a);
+        }
 
         // Add 256 to the next clock to account for the ecall.
         core.set_next_clk(core.next_clk() + 256);
 
-        Ok(EcallResult { a, a_record, b, b_record, c, c_record })
+        Ok(EcallResult { a, a_record, b, b_record, c, c_record, error, sig_return_pc_record })
     }
 
     /// Peek to get the code from the x5 register.
@@ -634,18 +511,297 @@ impl<'a> CoreVM<'a> {
         // Convert the raw value to a SyscallCode.
         SyscallCode::from_u32(syscall_id as u32)
     }
+
+    /// Compute the value to load based on opcode, address, and memory word.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    fn compute_load_value(opcode: Opcode, addr: u64, word: u64) -> Result<u64, ExecutionError> {
+        match opcode {
+            Opcode::LB => Ok(((word >> ((addr % 8) * 8)) & 0xFF) as i8 as i64 as u64),
+            Opcode::LH => {
+                if !addr.is_multiple_of(2) {
+                    return Err(ExecutionError::InvalidMemoryAccess(Opcode::LH, addr));
+                }
+                Ok(((word >> (((addr / 2) % 4) * 16)) & 0xFFFF) as i16 as i64 as u64)
+            }
+            Opcode::LW => {
+                if !addr.is_multiple_of(4) {
+                    return Err(ExecutionError::InvalidMemoryAccess(Opcode::LW, addr));
+                }
+                Ok(((word >> (((addr / 4) % 2) * 32)) & 0xFFFFFFFF) as i32 as u64)
+            }
+            Opcode::LBU => Ok(((word >> ((addr % 8) * 8)) & 0xFF) as u8 as u64),
+            Opcode::LHU => {
+                if !addr.is_multiple_of(2) {
+                    return Err(ExecutionError::InvalidMemoryAccess(Opcode::LHU, addr));
+                }
+                Ok(((word >> (((addr / 2) % 4) * 16)) & 0xFFFF) as u16 as u64)
+            }
+            Opcode::LWU => {
+                if !addr.is_multiple_of(4) {
+                    return Err(ExecutionError::InvalidMemoryAccess(Opcode::LWU, addr));
+                }
+                Ok((word >> (((addr / 4) % 2) * 32)) & 0xFFFFFFFF)
+            }
+            Opcode::LD => {
+                if !addr.is_multiple_of(8) {
+                    return Err(ExecutionError::InvalidMemoryAccess(Opcode::LD, addr));
+                }
+                Ok(word)
+            }
+            _ => unreachable!("Invalid opcode for `compute_load_value`: {:?}", opcode),
+        }
+    }
+
+    /// Compute the value to store based on opcode, source value, address, and current memory word.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    fn compute_store_value(
+        opcode: Opcode,
+        src: u64,
+        addr: u64,
+        word: u64,
+    ) -> Result<u64, ExecutionError> {
+        match opcode {
+            Opcode::SB => {
+                let shift = (addr % 8) * 8;
+                Ok(((src & 0xFF) << shift) | (word & !(0xFF << shift)))
+            }
+            Opcode::SH => {
+                if !addr.is_multiple_of(2) {
+                    return Err(ExecutionError::InvalidMemoryAccess(Opcode::SH, addr));
+                }
+                let shift = ((addr / 2) % 4) * 16;
+                Ok(((src & 0xFFFF) << shift) | (word & !(0xFFFF << shift)))
+            }
+            Opcode::SW => {
+                if !addr.is_multiple_of(4) {
+                    return Err(ExecutionError::InvalidMemoryAccess(Opcode::SW, addr));
+                }
+                let shift = ((addr / 4) % 2) * 32;
+                Ok(((src & 0xFFFFFFFF) << shift) | (word & !(0xFFFFFFFF << shift)))
+            }
+            Opcode::SD => {
+                if !addr.is_multiple_of(8) {
+                    return Err(ExecutionError::InvalidMemoryAccess(Opcode::SD, addr));
+                }
+                Ok(src)
+            }
+            _ => unreachable!("Invalid opcode for `compute_store_value`: {:?}", opcode),
+        }
+    }
 }
 
-impl CoreVM<'_> {
+impl CoreVM<'_, SupervisorMode> {
+    /// Fetch the next instruction from the program.
+    #[inline]
+    pub fn fetch(&mut self) -> Instruction {
+        *self.program.fetch(self.pc).unwrap()
+    }
+
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    fn mr(&mut self, addr: u64) -> MemoryReadRecord {
+        #[allow(clippy::manual_let_else)]
+        let record = match self.mem_reads.next() {
+            Some(next) => next,
+            None => {
+                unreachable!("memory reads unexpectedly exhausted at {addr}, clk {}", self.clk());
+            }
+        };
+
+        MemoryReadRecord {
+            value: record.value,
+            timestamp: self.timestamp(MemoryAccessPosition::Memory),
+            prev_timestamp: record.clk,
+            prev_page_prot_record: None,
+        }
+    }
+
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    fn mw(&mut self, read_record: MemoryReadRecord, value: u64) -> MemoryWriteRecord {
+        MemoryWriteRecord {
+            prev_timestamp: read_record.prev_timestamp,
+            prev_value: read_record.value,
+            timestamp: self.timestamp(MemoryAccessPosition::Memory),
+            value,
+            prev_page_prot_record: None,
+        }
+    }
+
+    /// Execute a load instruction.
+    #[inline]
+    pub fn execute_load(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<LoadResultSupervisor, ExecutionError> {
+        let (rd, rs1, imm) = instruction.i_type();
+
+        let rr_record = self.rr(rs1, MemoryAccessPosition::B);
+        let b = rr_record.value;
+
+        // Compute the address.
+        let addr = b.wrapping_add(imm);
+        let mr_record = self.mr(addr);
+        let word = mr_record.value;
+
+        let a = Self::compute_load_value(instruction.opcode, addr, word)?;
+        let rw_record = self.rw(rd, a);
+
+        Ok(LoadResultSupervisor { a, b, c: imm, addr, rs1, rd, rr_record, rw_record, mr_record })
+    }
+
+    /// Execute a store instruction.
+    #[inline]
+    pub fn execute_store(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<StoreResultSupervisor, ExecutionError> {
+        let (rs1, rs2, imm) = instruction.s_type();
+
+        let c = imm;
+        let rs2_record = self.rr(rs2, MemoryAccessPosition::B);
+        let rs1_record = self.rr(rs1, MemoryAccessPosition::A);
+
+        let b = rs2_record.value;
+        let a = rs1_record.value;
+        let addr = b.wrapping_add(c);
+        let mr_record = self.mr(addr);
+        let word = mr_record.value;
+
+        let memory_store_value = Self::compute_store_value(instruction.opcode, a, addr, word)?;
+        let mw_record = self.mw(mr_record, memory_store_value);
+
+        Ok(StoreResultSupervisor { a, b, c, addr, rs1, rs1_record, rs2, rs2_record, mw_record })
+    }
+}
+
+impl CoreVM<'_, UserMode> {
+    /// Fetch the next instruction from the program.
+    #[inline]
+    pub fn fetch(&mut self) -> Result<FetchResult, ExecutionError> {
+        if let Some(instruction) = self.program.fetch(self.pc) {
+            Ok(FetchResult {
+                pc: self.pc,
+                instruction: Some(*instruction),
+                mr_record: None,
+                error: None,
+            })
+        } else {
+            let aligned_pc = self.pc & !0b111;
+            let (mr_record, error) = self.mr_instr(
+                aligned_pc,
+                PROT_READ | PROT_EXEC,
+                MemoryAccessPosition::UntrustedInstruction,
+            );
+            if error.is_some() {
+                return Ok(FetchResult {
+                    pc: self.pc,
+                    instruction: None,
+                    mr_record: Some(mr_record),
+                    error,
+                });
+            }
+            let word = mr_record.value;
+            if !self.pc.is_multiple_of(4) {
+                return Err(ExecutionError::InvalidMemoryAccessUntrustedProgram(self.pc));
+            }
+            let aligned_offset = self.pc - aligned_pc;
+            let instruction_value: u32 =
+                (word >> (aligned_offset * 8) & 0xffffffff).try_into().unwrap();
+            let instruction = if let Some(cached_instruction) =
+                self.decoded_instruction_cache.get(&instruction_value)
+            {
+                *cached_instruction
+            } else {
+                let instruction =
+                    process_instruction(&mut self.transpiler, instruction_value).unwrap();
+                self.decoded_instruction_cache.insert(instruction_value, instruction);
+                instruction
+            };
+            Ok(FetchResult {
+                pc: self.pc,
+                instruction: Some(instruction),
+                mr_record: Some(mr_record),
+                error: None,
+            })
+        }
+    }
+
+    /// Execute a load instruction.
+    #[inline]
+    pub fn execute_load(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<LoadResult, ExecutionError> {
+        let (rd, rs1, imm) = instruction.i_type();
+
+        let rr_record = self.rr(rs1, MemoryAccessPosition::B);
+        let b = rr_record.value;
+
+        // Compute the address.
+        let addr = b.wrapping_add(imm);
+        let (mr_record, error) = self.mr_instr(addr, PROT_READ, MemoryAccessPosition::Memory);
+        let word = mr_record.value;
+
+        let mut a = Self::compute_load_value(instruction.opcode, addr, word)?;
+
+        // If there is a trap, then the write to `op_a` is a no-op, so write the original value.
+        if error.is_some() {
+            a = self.registers[rd as usize].value;
+        }
+
+        let rw_record = self.rw(rd, a);
+
+        Ok(LoadResult { a, b, c: imm, addr, rs1, rd, rr_record, rw_record, mr_record, error })
+    }
+
+    /// Execute a store instruction.
+    #[inline]
+    pub fn execute_store(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<StoreResult, ExecutionError> {
+        let (rs1, rs2, imm) = instruction.s_type();
+
+        let c = imm;
+        let rs2_record = self.rr(rs2, MemoryAccessPosition::B);
+        let rs1_record = self.rr(rs1, MemoryAccessPosition::A);
+
+        let b = rs2_record.value;
+        let a = rs1_record.value;
+        let addr = b.wrapping_add(c);
+        let (mut mw_record, error) = self.mw_instr(addr, MemoryAccessPosition::Memory);
+        let word = mw_record.prev_value;
+
+        let memory_store_value = Self::compute_store_value(instruction.opcode, a, addr, word)?;
+        mw_record.value = memory_store_value;
+
+        Ok(StoreResult { a, b, c, addr, rs1, rs1_record, rs2, rs2_record, mw_record, error })
+    }
+
     #[inline]
     fn mr_instr(
         &mut self,
         addr: u64,
         page_prot_bitmap: u8,
-        position: Option<MemoryAccessPosition>,
-    ) -> Result<MemoryReadRecord, ExecutionError> {
-        let prev_page_prot_record =
-            self.page_prot_check(addr >> LOG_PAGE_SIZE, page_prot_bitmap)?;
+        position: MemoryAccessPosition,
+    ) -> (MemoryReadRecord, Option<TrapError>) {
+        let (prev_page_prot_record, error) =
+            self.page_prot_check(addr >> LOG_PAGE_SIZE, page_prot_bitmap);
+
+        if error.is_some() {
+            return (
+                MemoryReadRecord {
+                    value: 0,
+                    timestamp: self.timestamp(position),
+                    prev_timestamp: 0,
+                    prev_page_prot_record,
+                },
+                error,
+            );
+        }
 
         #[allow(clippy::manual_let_else)]
         let record = match self.mem_reads.next() {
@@ -655,43 +811,60 @@ impl CoreVM<'_> {
             }
         };
 
-        Ok(MemoryReadRecord {
-            value: record.value,
-            timestamp: self.timestamp(position),
-            prev_timestamp: record.clk,
-            prev_page_prot_record,
-        })
+        (
+            MemoryReadRecord {
+                value: record.value,
+                timestamp: self.timestamp(position),
+                prev_timestamp: record.clk,
+                prev_page_prot_record,
+            },
+            None,
+        )
     }
 
     #[inline]
     fn mw_instr(
         &mut self,
         addr: u64,
-        position: Option<MemoryAccessPosition>,
-    ) -> Result<MemoryWriteRecord, ExecutionError> {
-        let prev_page_prot_record = self.page_prot_check(addr >> LOG_PAGE_SIZE, PROT_WRITE)?;
+        position: MemoryAccessPosition,
+    ) -> (MemoryWriteRecord, Option<TrapError>) {
+        let (prev_page_prot_record, error) =
+            self.page_prot_check(addr >> LOG_PAGE_SIZE, PROT_WRITE);
+
+        if error.is_some() {
+            return (
+                MemoryWriteRecord {
+                    prev_timestamp: 0,
+                    prev_value: 0,
+                    timestamp: self.timestamp(position),
+                    value: 0,
+                    prev_page_prot_record,
+                },
+                error,
+            );
+        }
 
         let mem_writes = self.core_mut().mem_reads();
-
         let old = mem_writes.next().expect("Precompile memory read out of bounds");
 
-        Ok(MemoryWriteRecord {
-            prev_timestamp: old.clk,
-            prev_value: old.value,
-            timestamp: self.timestamp(position),
-            // This will be updated in execute_store
-            value: 0,
-            prev_page_prot_record,
-        })
+        (
+            MemoryWriteRecord {
+                prev_timestamp: old.clk,
+                prev_value: old.value,
+                timestamp: self.timestamp(position),
+                // This will be updated in execute_store
+                value: 0,
+                prev_page_prot_record,
+            },
+            None,
+        )
     }
+}
 
+impl<M: ExecutionMode> CoreVM<'_, M> {
     /// Read a value from a register, updating the register entry and returning the record.
     #[inline]
-    fn rr(
-        &mut self,
-        register: Register,
-        position: Option<MemoryAccessPosition>,
-    ) -> MemoryReadRecord {
+    fn rr(&mut self, register: Register, position: MemoryAccessPosition) -> MemoryReadRecord {
         let prev_record = self.registers[register as usize];
         let new_record =
             MemoryRecord { timestamp: self.timestamp(position), value: prev_record.value };
@@ -706,9 +879,29 @@ impl CoreVM<'_> {
         }
     }
 
+    /// Read a value from a register, updating the register entry and returning the record.
+    #[inline]
+    #[must_use]
+    pub fn rr_peek(&self, register: Register, position: MemoryAccessPosition) -> MemoryReadRecord {
+        let prev_record = self.registers[register as usize];
+        let new_record =
+            MemoryRecord { timestamp: self.timestamp(position), value: prev_record.value };
+
+        MemoryReadRecord {
+            value: new_record.value,
+            timestamp: new_record.timestamp,
+            prev_timestamp: prev_record.timestamp,
+            prev_page_prot_record: None,
+        }
+    }
+
     /// Touch all the registers in the VM, bumping thier clock to `self.clk - 1`.
     pub fn register_refresh(&mut self) -> [MemoryReadRecord; 32] {
-        fn bump_register(vm: &mut CoreVM, register: usize) -> MemoryReadRecord {
+        #[inline]
+        fn bump_register<N: ExecutionMode>(
+            vm: &mut CoreVM<N>,
+            register: usize,
+        ) -> MemoryReadRecord {
             let prev_record = vm.registers[register];
             let new_record = MemoryRecord { timestamp: vm.clk - 1, value: prev_record.value };
 
@@ -742,8 +935,7 @@ impl CoreVM<'_> {
         let value = if register == Register::X0 { 0 } else { value };
 
         let prev_record = self.registers[register as usize];
-        let new_record =
-            MemoryRecord { timestamp: self.timestamp(Some(MemoryAccessPosition::A)), value };
+        let new_record = MemoryRecord { timestamp: self.timestamp(MemoryAccessPosition::A), value };
 
         self.registers[register as usize] = new_record;
 
@@ -757,16 +949,12 @@ impl CoreVM<'_> {
     }
 }
 
-impl CoreVM<'_> {
+impl<M: ExecutionMode> CoreVM<'_, M> {
     /// Get the current timestamp for a given memory access position.
     #[inline]
     #[must_use]
-    pub const fn timestamp(&self, position: Option<MemoryAccessPosition>) -> u64 {
-        if let Some(position) = position {
-            self.clk + position as u64
-        } else {
-            self.clk
-        }
+    pub const fn timestamp(&self, position: MemoryAccessPosition) -> u64 {
+        self.clk + position as u64
     }
 
     /// Check if the top 24 bits have changed, which imply a `state bump` event needs to be emitted.
@@ -793,7 +981,7 @@ impl CoreVM<'_> {
     }
 }
 
-impl<'a> CoreVM<'a> {
+impl<'a, M: ExecutionMode> CoreVM<'a, M> {
     #[inline]
     #[must_use]
     /// Get the current clock, this clock is incremented by [`CLK_INC`] each cycle.

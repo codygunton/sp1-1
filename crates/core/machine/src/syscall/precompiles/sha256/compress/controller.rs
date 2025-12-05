@@ -135,15 +135,9 @@ impl<F: PrimeField32, M: TrustMode> MachineAir<F> for ShaCompressControlChip<M> 
             cols.w_slice_end.populate(&mut blu_events, event.w_ptr, OFFSET_LAST_ELEM_W * 8);
             cols.h_slice_end.populate(&mut blu_events, event.h_ptr, OFFSET_LAST_ELEM_H * 8);
             cols.is_real = F::one();
-            for i in 0..8 {
-                let prev_value = event.h[i];
-                let value = event.h_write_records[i].value;
-                // The state is the `a, b, c, d, e, f, g, h` values.
-                cols.initial_state[i] = u32_to_half_word(prev_value);
-                // The `value` here is the resulting hash values, which are incremented by
-                // `a, b, c, d, e, f, g, h` values - therefore, we do a subtraction here.
-                cols.final_state[i] = u32_to_half_word((value as u32).wrapping_sub(prev_value));
-            }
+            let mut is_not_trap = true;
+            let mut trap_code = 0u8;
+
             if !M::IS_TRUSTED {
                 let cols: &mut ShaCompressControlCols<F, UserMode> = row.borrow_mut();
                 // Constrain page prot access for reading initial h state
@@ -153,9 +147,9 @@ impl<F: PrimeField32, M: TrustMode> MachineAir<F> for ShaCompressControlChip<M> 
                     event.h_ptr + OFFSET_LAST_ELEM_H * 8,
                     event.clk,
                     PROT_READ,
-                    &event.page_prot_access.h_read_page_prot_records[0],
-                    &event.page_prot_access.h_read_page_prot_records.get(1).copied(),
-                    input.public_values.is_untrusted_programs_enabled,
+                    &event.page_prot_access.h_read_page_prot_records,
+                    &mut is_not_trap,
+                    &mut trap_code,
                 );
 
                 // Constrain page prot access for reading w state to feed into compress
@@ -165,9 +159,9 @@ impl<F: PrimeField32, M: TrustMode> MachineAir<F> for ShaCompressControlChip<M> 
                     event.w_ptr + OFFSET_LAST_ELEM_W * 8,
                     event.clk + 1,
                     PROT_READ,
-                    &event.page_prot_access.w_read_page_prot_records[0],
-                    &event.page_prot_access.w_read_page_prot_records.get(1).copied(),
-                    input.public_values.is_untrusted_programs_enabled,
+                    &event.page_prot_access.w_read_page_prot_records,
+                    &mut is_not_trap,
+                    &mut trap_code,
                 );
 
                 // Constrain page prot access for writing final h after compress completed
@@ -177,10 +171,26 @@ impl<F: PrimeField32, M: TrustMode> MachineAir<F> for ShaCompressControlChip<M> 
                     event.h_ptr + OFFSET_LAST_ELEM_H * 8,
                     event.clk + 2,
                     PROT_WRITE,
-                    &event.page_prot_access.h_write_page_prot_records[0],
-                    &event.page_prot_access.h_write_page_prot_records.get(1).copied(),
-                    input.public_values.is_untrusted_programs_enabled,
+                    &event.page_prot_access.h_write_page_prot_records,
+                    &mut is_not_trap,
+                    &mut trap_code,
                 );
+            }
+
+            let cols: &mut ShaCompressControlCols<F, M> = row.borrow_mut();
+            for i in 0..8 {
+                let prev_value = event.h[i];
+                let value = event.h_write_records[i].value;
+                if is_not_trap {
+                    // The state is the `a, b, c, d, e, f, g, h` values.
+                    cols.initial_state[i] = u32_to_half_word(prev_value);
+                    // The `value` here is the resulting hash values, which are incremented by
+                    // `a, b, c, d, e, f, g, h` values - therefore, we do a subtraction here.
+                    cols.final_state[i] = u32_to_half_word((value as u32).wrapping_sub(prev_value));
+                } else {
+                    cols.initial_state[i] = [F::zero(); 2];
+                    cols.final_state[i] = [F::zero(); 2];
+                }
             }
         });
 
@@ -236,16 +246,50 @@ where
             local.is_real.into(),
         );
 
-        // Receive the syscall.
-        builder.receive_syscall(
-            local.clk_high,
-            local.clk_low,
-            AB::F::from_canonical_u32(SyscallCode::SHA_COMPRESS.syscall_id()),
-            w_ptr.map(Into::into),
-            h_ptr.map(Into::into),
-            local.is_real,
-            InteractionScope::Local,
-        );
+        let mut is_not_trap = local.is_real.into();
+        let mut trap_code = AB::Expr::zero();
+
+        // Evaluate the page prot accesses only for user mode.
+        if !M::IS_TRUSTED {
+            let local = main.row_slice(0);
+            let local: &ShaCompressControlCols<AB::Var, UserMode> = (*local).borrow();
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into(),
+                &local.h_ptr.addr.map(Into::into),
+                &local.h_slice_end.value.map(Into::into),
+                PROT_READ,
+                &local.h_read_page_prot_access,
+                &mut is_not_trap,
+                &mut trap_code,
+            );
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into() + AB::Expr::one(),
+                &local.w_ptr.addr.map(Into::into),
+                &local.w_slice_end.value.map(Into::into),
+                PROT_READ,
+                &local.w_read_page_prot_access,
+                &mut is_not_trap,
+                &mut trap_code,
+            );
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into() + AB::Expr::from_canonical_u32(2),
+                &local.h_ptr.addr.map(Into::into),
+                &local.h_slice_end.value.map(Into::into),
+                PROT_WRITE,
+                &local.h_write_page_prot_access,
+                &mut is_not_trap,
+                &mut trap_code,
+            );
+        }
 
         // Send the initial state. The initial index is 0.
         // The initial state will be constrained by the `ShaCompressChip`.
@@ -259,7 +303,7 @@ where
             )
             .collect::<Vec<_>>();
         builder.send(
-            AirInteraction::new(send_values, local.is_real.into(), InteractionKind::ShaCompress),
+            AirInteraction::new(send_values, is_not_trap.clone(), InteractionKind::ShaCompress),
             InteractionScope::Local,
         );
 
@@ -273,7 +317,7 @@ where
             .chain(local.final_state.into_iter().flat_map(|word| word.into_iter()).map(Into::into))
             .collect::<Vec<_>>();
         builder.receive(
-            AirInteraction::new(receive_values, local.is_real.into(), InteractionKind::ShaCompress),
+            AirInteraction::new(receive_values, is_not_trap.clone(), InteractionKind::ShaCompress),
             InteractionScope::Local,
         );
 
@@ -282,43 +326,16 @@ where
             AB::Expr::from_bool(!M::IS_TRUSTED),
         );
 
-        // Evaluate the page prot accesses only for user mode.
-        if !M::IS_TRUSTED {
-            let local = main.row_slice(0);
-            let local: &ShaCompressControlCols<AB::Var, UserMode> = (*local).borrow();
-
-            AddressSlicePageProtOperation::<AB::F>::eval(
-                builder,
-                local.clk_high.into(),
-                local.clk_low.into(),
-                &local.h_ptr.addr.map(Into::into),
-                &local.h_slice_end.value.map(Into::into),
-                AB::Expr::from_canonical_u8(PROT_READ),
-                &local.h_read_page_prot_access,
-                local.is_real.into(),
-            );
-
-            AddressSlicePageProtOperation::<AB::F>::eval(
-                builder,
-                local.clk_high.into(),
-                local.clk_low.into() + AB::Expr::one(),
-                &local.w_ptr.addr.map(Into::into),
-                &local.w_slice_end.value.map(Into::into),
-                AB::Expr::from_canonical_u8(PROT_READ),
-                &local.w_read_page_prot_access,
-                local.is_real.into(),
-            );
-
-            AddressSlicePageProtOperation::<AB::F>::eval(
-                builder,
-                local.clk_high.into(),
-                local.clk_low.into() + AB::Expr::from_canonical_u32(2),
-                &local.h_ptr.addr.map(Into::into),
-                &local.h_slice_end.value.map(Into::into),
-                AB::Expr::from_canonical_u8(PROT_WRITE),
-                &local.h_write_page_prot_access,
-                local.is_real.into(),
-            );
-        }
+        // Receive the syscall.
+        builder.receive_syscall(
+            local.clk_high,
+            local.clk_low,
+            AB::F::from_canonical_u32(SyscallCode::SHA_COMPRESS.syscall_id()),
+            trap_code.clone(),
+            w_ptr.map(Into::into),
+            h_ptr.map(Into::into),
+            local.is_real,
+            InteractionScope::Local,
+        );
     }
 }

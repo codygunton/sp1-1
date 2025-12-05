@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use slop_algebra::{AbstractField, PrimeField32};
 use sp1_primitives::consts::split_page_idx;
 
-use crate::{septic_curve::SepticCurve, septic_digest::SepticDigest, PROOF_MAX_NUM_PVS};
+use crate::{
+    addr_to_limbs, septic_curve::SepticCurve, septic_digest::SepticDigest, PROOF_MAX_NUM_PVS,
+};
 
 /// The number of non padded elements in the SP1 proofs public values vec.
 pub const SP1_PROOF_NUM_PV_ELTS: usize = size_of::<PublicValues<[u8; 4], [u8; 3], [u8; 4], u8>>();
@@ -143,6 +145,15 @@ pub struct PublicValues<W1, W2, W3, T> {
     /// instructions from memory during runtime and checking/setting page permissions.
     pub is_untrusted_programs_enabled: T,
 
+    /// Whether or not a trap handler exists.
+    pub enable_trap_handler: T,
+
+    /// The trap context.
+    pub trap_context: [W2; 3],
+
+    /// The untrusted memory region.
+    pub untrusted_memory: [W2; 2],
+
     /// The nonce used for this proof.
     pub proof_nonce: [T; PROOF_NONCE_NUM_WORDS],
 
@@ -202,7 +213,13 @@ impl PublicValues<u32, u64, u64, u32> {
     /// Get the public values corresponding to initial state of the program for a non-execution
     /// shard.
     #[must_use]
-    pub fn initialize(&self, pc_start_abs: u64, enable_untrusted_programs: bool) -> Self {
+    pub fn initialize(
+        &self,
+        pc_start_abs: u64,
+        enable_untrusted_programs: bool,
+        trap_context: Option<u64>,
+        untrusted_memory: Option<(u64, u64)>,
+    ) -> Self {
         let mut state = *self;
         state.pc_start = pc_start_abs;
         state.next_pc = pc_start_abs;
@@ -215,6 +232,9 @@ impl PublicValues<u32, u64, u64, u32> {
         state.initial_timestamp_inv = 0;
         state.last_timestamp_inv = 0;
         state.is_untrusted_programs_enabled = enable_untrusted_programs as u32;
+        state.enable_trap_handler = trap_context.is_some() as u32;
+        state.trap_context = trap_context.map_or([0, 0, 0], |addr| [addr, addr + 8, addr + 16]);
+        state.untrusted_memory = untrusted_memory.map_or([0, 0], |(start, end)| [start, end]);
         state
     }
 
@@ -232,11 +252,20 @@ impl PublicValues<u32, u64, u64, u32> {
         self.is_first_execution_shard = state.is_first_execution_shard;
         self.is_execution_shard = state.is_execution_shard;
         self.is_untrusted_programs_enabled = state.is_untrusted_programs_enabled;
+        self.enable_trap_handler = state.enable_trap_handler;
+        self.trap_context = state.trap_context;
+        self.untrusted_memory = state.untrusted_memory;
     }
 
     /// Update the public values to the state, as a non-execution shard in the initial state of the
     /// program's execution.
-    pub fn update_initialized_state(&mut self, pc_start_abs: u64, enable_untrusted_programs: bool) {
+    pub fn update_initialized_state(
+        &mut self,
+        pc_start_abs: u64,
+        enable_untrusted_programs: bool,
+        trap_context: Option<u64>,
+        untrusted_memory: Option<(u64, u64)>,
+    ) {
         self.pc_start = pc_start_abs;
         self.next_pc = pc_start_abs;
         self.exit_code = 0;
@@ -249,6 +278,9 @@ impl PublicValues<u32, u64, u64, u32> {
         self.initial_timestamp_inv = 0;
         self.last_timestamp_inv = 0;
         self.is_untrusted_programs_enabled = enable_untrusted_programs as u32;
+        self.enable_trap_handler = trap_context.is_some() as u32;
+        self.trap_context = trap_context.map_or([0, 0, 0], |addr| [addr, addr + 8, addr + 16]);
+        self.untrusted_memory = untrusted_memory.map_or([0, 0], |(start, end)| [start, end]);
     }
 
     /// Update the public values to the state, as a non-execution shard in the final state of the
@@ -260,6 +292,9 @@ impl PublicValues<u32, u64, u64, u32> {
         pc: u64,
         exit_code: u32,
         is_untrusted_programs_enabled: u32,
+        enable_trap_handler: u32,
+        trap_context: [u64; 3],
+        untrusted_memory: [u64; 2],
         committed_value_digest: [u32; PV_DIGEST_NUM_WORDS],
         deferred_proofs_digest: [u32; POSEIDON_NUM_WORDS],
         nonce: [u32; PROOF_NONCE_NUM_WORDS],
@@ -280,7 +315,10 @@ impl PublicValues<u32, u64, u64, u32> {
         self.prev_deferred_proofs_digest = deferred_proofs_digest;
         self.deferred_proofs_digest = deferred_proofs_digest;
         self.is_untrusted_programs_enabled = is_untrusted_programs_enabled;
+        self.enable_trap_handler = enable_trap_handler;
         self.prev_exit_code = exit_code;
+        self.trap_context = trap_context;
+        self.untrusted_memory = untrusted_memory;
         self.prev_commit_syscall = 1;
         self.commit_syscall = 1;
         self.prev_commit_deferred_syscall = 1;
@@ -299,6 +337,9 @@ impl PublicValues<u32, u64, u64, u32> {
             public_values.next_pc,
             public_values.exit_code,
             public_values.is_untrusted_programs_enabled,
+            public_values.enable_trap_handler,
+            public_values.trap_context,
+            public_values.untrusted_memory,
             public_values.committed_value_digest,
             public_values.deferred_proofs_digest,
             public_values.proof_nonce,
@@ -494,6 +535,9 @@ impl<F: AbstractField> From<PublicValues<u32, u64, u64, u32>>
             prev_commit_deferred_syscall,
             commit_deferred_syscall,
             is_untrusted_programs_enabled,
+            enable_trap_handler,
+            trap_context,
+            untrusted_memory,
             proof_nonce,
             initial_timestamp_inv,
             last_timestamp_inv,
@@ -605,6 +649,14 @@ impl<F: AbstractField> From<PublicValues<u32, u64, u64, u32>>
         let last_timestamp_inv = F::from_canonical_u32(last_timestamp_inv);
         let is_first_execution_shard = F::from_canonical_u32(is_first_execution_shard);
         let is_untrusted_programs_enabled = F::from_canonical_u32(is_untrusted_programs_enabled);
+        let enable_trap_handler = F::from_canonical_u32(enable_trap_handler);
+        let trap_context = [
+            addr_to_limbs::<F>(trap_context[0]),
+            addr_to_limbs::<F>(trap_context[1]),
+            addr_to_limbs::<F>(trap_context[2]),
+        ];
+        let untrusted_memory =
+            [addr_to_limbs::<F>(untrusted_memory[0]), addr_to_limbs::<F>(untrusted_memory[1])];
 
         let proof_nonce: [_; PROOF_NONCE_NUM_WORDS] =
             core::array::from_fn(|i| F::from_canonical_u32(proof_nonce[i]));
@@ -644,6 +696,9 @@ impl<F: AbstractField> From<PublicValues<u32, u64, u64, u32>>
             prev_commit_deferred_syscall,
             commit_deferred_syscall,
             is_untrusted_programs_enabled,
+            enable_trap_handler,
+            trap_context,
+            untrusted_memory,
             initial_timestamp_inv,
             last_timestamp_inv,
             is_first_execution_shard,

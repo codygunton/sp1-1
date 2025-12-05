@@ -9,7 +9,7 @@ use rand::{rngs::OsRng, RngCore};
 
 use itertools::Itertools;
 use slop_symmetric::CryptographicHasher;
-use sp1_core_executor::{MinimalExecutor, Program};
+use sp1_core_executor::{MinimalExecutorEnum, Program};
 use sp1_core_machine::io::SP1Stdin;
 use sp1_primitives::{poseidon2_hasher, SP1Field};
 use sp1_recursion_circuit::machine::RootPublicValues;
@@ -71,7 +71,7 @@ impl SP1CoreProofData {
 /// Get the number of cycles for a given program.
 pub fn get_cycles(elf: &[u8], stdin: &SP1Stdin) -> u64 {
     let program = Program::from(elf).unwrap();
-    let mut executor = MinimalExecutor::new(Arc::new(program), false, None);
+    let mut executor = MinimalExecutorEnum::new(Arc::new(program), false, None);
     for buf in &stdin.buffer {
         executor.with_input(buf);
     }

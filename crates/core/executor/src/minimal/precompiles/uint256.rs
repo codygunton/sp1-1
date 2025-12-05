@@ -18,10 +18,12 @@ pub(crate) unsafe fn uint256_mul(
         panic!();
     }
 
+    let clk = ctx.get_current_clk();
     ctx.read_slice_check(y_ptr, WORDS_FIELD_ELEMENT * 2)?;
     ctx.bump_memory_clk();
     ctx.read_write_slice_check(x_ptr, 4)?;
 
+    ctx.set_clk(clk);
     // First read the words for the x value. We can read a slice_unsafe here because we write
     // the computed result to x later.
     let x = words_to_bytes_le_vec(ctx.mr_slice_unsafe(x_ptr, WORDS_FIELD_ELEMENT));

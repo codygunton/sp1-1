@@ -1,7 +1,7 @@
 use futures::{stream::FuturesUnordered, StreamExt};
 use slop_futures::pipeline::{AsyncEngine, AsyncWorker, Pipeline, SubmitHandle};
 use sp1_core_executor::{
-    ExecutionError, ExecutionReport, GasEstimatingVM, MinimalExecutor, Program, SP1Context,
+    ExecutionError, ExecutionReport, GasEstimatingVMEnum, MinimalExecutorEnum, Program, SP1Context,
     SP1CoreOpts,
 };
 use sp1_core_machine::io::SP1Stdin;
@@ -87,13 +87,14 @@ impl AsyncWorker<GasExecutingTask, Result<ExecutionReport, ExecutionError>> for 
         if !self.calculate_gas {
             return Ok(ExecutionReport::default());
         }
+
         let mut gas_estimating_vm =
-            GasEstimatingVM::new(&chunk, self.program.clone(), self.nonce, self.opts.clone());
+            GasEstimatingVMEnum::new(&chunk, self.program.clone(), self.nonce, self.opts.clone());
         let report = gas_estimating_vm.execute()?;
 
         // If the VM has completed execution, set the final state.
-        if gas_estimating_vm.core.is_done() {
-            let final_state = FinalVmState::new(&gas_estimating_vm.core);
+        if gas_estimating_vm.is_done() {
+            let final_state = FinalVmState::from_gas_estimating_vm_enum(&gas_estimating_vm);
             final_vm_state.set(final_state).map_err(|e| {
                 ExecutionError::Other(format!("failed to set final vm state: {}", e))
             })?;
@@ -119,7 +120,7 @@ pub async fn execute_with_options(
         initialize_gas_engine(&executor_config, program.clone(), nonce, opts, calculate_gas);
 
     let mut minimal_executor =
-        MinimalExecutor::new(program.clone(), false, minimal_trace_chunk_threshold);
+        MinimalExecutorEnum::new(program.clone(), false, minimal_trace_chunk_threshold);
 
     // Feed stdin buffers to the executor
     for buf in stdin.buffer {

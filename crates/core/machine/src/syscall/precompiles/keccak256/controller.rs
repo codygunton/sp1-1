@@ -91,16 +91,9 @@ impl<F: PrimeField32, M: TrustMode> MachineAir<F> for KeccakPermuteControlChip<M
             let mut row = vec![F::zero(); width];
             let cols: &mut KeccakPermuteControlCols<F, M> = row.as_mut_slice().borrow_mut();
             cols.state_addr.populate(&mut blu_events, event.state_addr, 200);
-            for (j, read_record) in event.state_read_records.iter().enumerate() {
-                cols.initial_memory_access[j]
-                    .populate(MemoryRecordEnum::Read(*read_record), &mut blu_events);
-                cols.addrs[j].populate(&mut blu_events, event.state_addr, 8 * j as u64);
-            }
-            for (j, write_record) in event.state_write_records.iter().enumerate() {
-                cols.final_memory_access[j]
-                    .populate(MemoryRecordEnum::Write(*write_record), &mut blu_events);
-                cols.final_value[j] = Word::from(write_record.value);
-            }
+            let mut is_not_trap = true;
+            let mut trap_code = 0u8;
+
             if !M::IS_TRUSTED {
                 let cols: &mut KeccakPermuteControlCols<F, UserMode> =
                     row.as_mut_slice().borrow_mut();
@@ -110,9 +103,9 @@ impl<F: PrimeField32, M: TrustMode> MachineAir<F> for KeccakPermuteControlChip<M
                     event.state_addr + 8 * (STATE_NUM_WORDS - 1) as u64,
                     event.clk,
                     PROT_READ,
-                    &event.page_prot_records.read_pre_state_page_prot_records[0],
-                    &event.page_prot_records.read_pre_state_page_prot_records.get(1).copied(),
-                    input.public_values.is_untrusted_programs_enabled,
+                    &event.page_prot_records.read_pre_state_page_prot_records,
+                    &mut is_not_trap,
+                    &mut trap_code,
                 );
                 cols.write_state_slice_page_prot_access.populate(
                     &mut blu_events,
@@ -120,10 +113,30 @@ impl<F: PrimeField32, M: TrustMode> MachineAir<F> for KeccakPermuteControlChip<M
                     event.state_addr + 8 * (STATE_NUM_WORDS - 1) as u64,
                     event.clk + 1,
                     PROT_WRITE,
-                    &event.page_prot_records.write_post_state_page_prot_records[0],
-                    &event.page_prot_records.write_post_state_page_prot_records.get(1).copied(),
-                    input.public_values.is_untrusted_programs_enabled,
+                    &event.page_prot_records.write_post_state_page_prot_records,
+                    &mut is_not_trap,
+                    &mut trap_code,
                 );
+            }
+
+            let cols: &mut KeccakPermuteControlCols<F, M> = row.as_mut_slice().borrow_mut();
+            for i in 0..25 {
+                cols.addrs[i].populate(&mut blu_events, event.state_addr, 8 * i as u64);
+                if is_not_trap {
+                    cols.initial_memory_access[i].populate(
+                        MemoryRecordEnum::Read(event.state_read_records[i]),
+                        &mut blu_events,
+                    );
+                    cols.final_memory_access[i].populate(
+                        MemoryRecordEnum::Write(event.state_write_records[i]),
+                        &mut blu_events,
+                    );
+                    cols.final_value[i] = Word::from(event.state_write_records[i].value);
+                } else {
+                    cols.initial_memory_access[i] = MemoryAccessCols::<F>::default();
+                    cols.final_memory_access[i] = MemoryAccessCols::<F>::default();
+                    cols.final_value[i] = Word::<F>::default();
+                }
             }
         }
         output.add_byte_lookup_events(blu_events);
@@ -179,16 +192,10 @@ impl<F: PrimeField32, M: TrustMode> MachineAir<F> for KeccakPermuteControlChip<M
             cols.clk_low = F::from_canonical_u32((event.clk & 0xFFFFFF) as u32);
             cols.state_addr.populate(&mut blu_events, event.state_addr, 200);
             cols.is_real = F::one();
-            for (j, read_record) in event.state_read_records.iter().enumerate() {
-                cols.initial_memory_access[j]
-                    .populate(MemoryRecordEnum::Read(*read_record), &mut blu_events);
-                cols.addrs[j].populate(&mut blu_events, event.state_addr, 8 * j as u64);
-            }
-            for (j, write_record) in event.state_write_records.iter().enumerate() {
-                cols.final_memory_access[j]
-                    .populate(MemoryRecordEnum::Write(*write_record), &mut blu_events);
-                cols.final_value[j] = Word::from(write_record.value);
-            }
+
+            let mut is_not_trap = true;
+            let mut trap_code = 0u8;
+
             if !M::IS_TRUSTED {
                 let cols: &mut KeccakPermuteControlCols<F, UserMode> = row.borrow_mut();
                 cols.read_state_slice_page_prot_access.populate(
@@ -197,9 +204,9 @@ impl<F: PrimeField32, M: TrustMode> MachineAir<F> for KeccakPermuteControlChip<M
                     event.state_addr + 8 * (STATE_NUM_WORDS - 1) as u64,
                     event.clk,
                     PROT_READ,
-                    &event.page_prot_records.read_pre_state_page_prot_records[0],
-                    &event.page_prot_records.read_pre_state_page_prot_records.get(1).copied(),
-                    input.public_values.is_untrusted_programs_enabled,
+                    &event.page_prot_records.read_pre_state_page_prot_records,
+                    &mut is_not_trap,
+                    &mut trap_code,
                 );
                 cols.write_state_slice_page_prot_access.populate(
                     &mut blu_events,
@@ -207,10 +214,30 @@ impl<F: PrimeField32, M: TrustMode> MachineAir<F> for KeccakPermuteControlChip<M
                     event.state_addr + 8 * (STATE_NUM_WORDS - 1) as u64,
                     event.clk + 1,
                     PROT_WRITE,
-                    &event.page_prot_records.write_post_state_page_prot_records[0],
-                    &event.page_prot_records.write_post_state_page_prot_records.get(1).copied(),
-                    input.public_values.is_untrusted_programs_enabled,
+                    &event.page_prot_records.write_post_state_page_prot_records,
+                    &mut is_not_trap,
+                    &mut trap_code,
                 );
+            }
+
+            let cols: &mut KeccakPermuteControlCols<F, M> = row.borrow_mut();
+            for i in 0..25 {
+                cols.addrs[i].populate(&mut blu_events, event.state_addr, 8 * i as u64);
+                if is_not_trap {
+                    cols.initial_memory_access[i].populate(
+                        MemoryRecordEnum::Read(event.state_read_records[i]),
+                        &mut blu_events,
+                    );
+                    cols.final_memory_access[i].populate(
+                        MemoryRecordEnum::Write(event.state_write_records[i]),
+                        &mut blu_events,
+                    );
+                    cols.final_value[i] = Word::from(event.state_write_records[i].value);
+                } else {
+                    cols.initial_memory_access[i] = MemoryAccessCols::<F>::default();
+                    cols.final_memory_access[i] = MemoryAccessCols::<F>::default();
+                    cols.final_value[i] = Word::<F>::default();
+                }
             }
         });
     }
@@ -247,11 +274,45 @@ where
             local.is_real.into(),
         );
 
+        let mut is_not_trap = local.is_real.into();
+        let mut trap_code = AB::Expr::zero();
+
+        // Evaluate the page prot accesses.
+        if !M::IS_TRUSTED {
+            let local = main.row_slice(0);
+            let local: &KeccakPermuteControlCols<AB::Var, UserMode> = (*local).borrow();
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into(),
+                &local.state_addr.addr.map(Into::into),
+                &local.addrs[STATE_NUM_WORDS - 1].value.map(Into::into),
+                PROT_READ,
+                &local.read_state_slice_page_prot_access,
+                &mut is_not_trap,
+                &mut trap_code,
+            );
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into() + AB::Expr::one(),
+                &local.state_addr.addr.map(Into::into),
+                &local.addrs[STATE_NUM_WORDS - 1].value.map(Into::into),
+                PROT_WRITE,
+                &local.write_state_slice_page_prot_access,
+                &mut is_not_trap,
+                &mut trap_code,
+            );
+        }
+
         // Receive the syscall.
         builder.receive_syscall(
             local.clk_high,
             local.clk_low,
             AB::F::from_canonical_u32(SyscallCode::KECCAK_PERMUTE.syscall_id()),
+            trap_code.clone(),
             state_addr.map(Into::into),
             [AB::Expr::zero(), AB::Expr::zero(), AB::Expr::zero()],
             local.is_real,
@@ -273,7 +334,7 @@ where
 
         // Send the initial state.
         builder.send(
-            AirInteraction::new(send_values, local.is_real.into(), InteractionKind::Keccak),
+            AirInteraction::new(send_values, is_not_trap.clone(), InteractionKind::Keccak),
             InteractionScope::Local,
         );
 
@@ -286,7 +347,7 @@ where
 
         // Receive the final state.
         builder.receive(
-            AirInteraction::new(receive_values, local.is_real.into(), InteractionKind::Keccak),
+            AirInteraction::new(receive_values, is_not_trap.clone(), InteractionKind::Keccak),
             InteractionScope::Local,
         );
 
@@ -313,7 +374,7 @@ where
                 local.clk_low,
                 &local.addrs[i].value.map(Into::into),
                 local.initial_memory_access[i],
-                local.is_real,
+                is_not_trap.clone(),
             );
             builder.eval_memory_access_write(
                 local.clk_high,
@@ -321,7 +382,7 @@ where
                 &local.addrs[i].value.map(Into::into),
                 local.final_memory_access[i],
                 local.final_value[i],
-                local.is_real,
+                is_not_trap.clone(),
             );
         }
 
@@ -329,33 +390,5 @@ where
             builder.extract_public_values().is_untrusted_programs_enabled,
             AB::Expr::from_bool(!M::IS_TRUSTED),
         );
-
-        // Evaluate the page prot accesses.
-        if !M::IS_TRUSTED {
-            let local = main.row_slice(0);
-            let local: &KeccakPermuteControlCols<AB::Var, UserMode> = (*local).borrow();
-
-            AddressSlicePageProtOperation::<AB::F>::eval(
-                builder,
-                local.clk_high.into(),
-                local.clk_low.into(),
-                &local.state_addr.addr.map(Into::into),
-                &local.addrs[STATE_NUM_WORDS - 1].value.map(Into::into),
-                AB::Expr::from_canonical_u8(PROT_READ),
-                &local.read_state_slice_page_prot_access,
-                local.is_real.into(),
-            );
-
-            AddressSlicePageProtOperation::<AB::F>::eval(
-                builder,
-                local.clk_high.into(),
-                local.clk_low.into() + AB::Expr::one(),
-                &local.state_addr.addr.map(Into::into),
-                &local.addrs[STATE_NUM_WORDS - 1].value.map(Into::into),
-                AB::Expr::from_canonical_u8(PROT_WRITE),
-                &local.write_state_slice_page_prot_access,
-                local.is_real.into(),
-            );
-        }
     }
 }

@@ -138,7 +138,7 @@ impl<'a> SP1ContextBuilder<'a> {
             deferred_proof_verification: true,
             calculate_gas: true,
             expected_exit_code: None,
-            proof_nonce: [0, 0, 0, 0], // Default to zeros, will be set by SDK
+            proof_nonce: [1, 2, 3, 4], // Default to some random values, will be set by SDK
             io_options: IoOptions::new(),
         }
     }

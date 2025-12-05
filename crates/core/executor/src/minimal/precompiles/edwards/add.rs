@@ -6,5 +6,5 @@ pub unsafe fn edwards_add<E: EdwardsParameters + EllipticCurve>(
     arg1: u64,
     arg2: u64,
 ) -> Result<Option<u64>, Interrupt> {
-    crate::minimal::precompiles::ec::ec_add::<E>(ctx, arg1, arg2).map(|_| None)
+    crate::minimal::precompiles::ec::ec_add::<E>(ctx, arg1, arg2).map(|()| None)
 }

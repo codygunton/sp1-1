@@ -302,45 +302,56 @@ pub enum RiscvAirId {
     /// The syscall instructions chip.
     #[subenum(CoreAirId)]
     SyscallInstrs = 107,
+    /// The syscall instructions chip for user mode.
+    #[subenum(CoreAirId)]
+    SyscallInstrsUser = 108,
     /// The memory bump chip.
     #[subenum(CoreAirId)]
-    MemoryBump = 108,
+    MemoryBump = 109,
     /// The state bump chip.
     #[subenum(CoreAirId)]
-    StateBump = 109,
+    StateBump = 110,
     /// The memory global init chip.
-    MemoryGlobalInit = 110,
+    MemoryGlobalInit = 111,
     /// The memory global finalize chip.
-    MemoryGlobalFinalize = 111,
+    MemoryGlobalFinalize = 112,
     /// The memory local chip.
     #[subenum(CoreAirId)]
-    MemoryLocal = 112,
+    MemoryLocal = 113,
     /// The global chip.
     #[subenum(CoreAirId)]
-    Global = 113,
+    Global = 114,
     /// The byte chip.
-    Byte = 114,
+    Byte = 115,
     /// The range chip.
-    Range = 115,
+    Range = 116,
     /// The mprotect chip.
     #[subenum(CoreAirId)]
-    Mprotect = 116,
+    Mprotect = 117,
+    /// The sigreturn chip.
+    SigReturn = 118,
     /// The instruction decode chip.
     #[subenum(CoreAirId)]
-    InstructionDecode = 117,
+    InstructionDecode = 119,
     /// The instruction fetch chip.
     #[subenum(CoreAirId)]
-    InstructionFetch = 118,
+    InstructionFetch = 120,
     /// The page prot chip.
     #[subenum(CoreAirId)]
-    PageProt = 119,
+    PageProt = 121,
     /// The page prot local chip.
     #[subenum(CoreAirId)]
-    PageProtLocal = 120,
+    PageProtLocal = 122,
     /// The page prot global init chip.
-    PageProtGlobalInit = 121,
+    PageProtGlobalInit = 123,
     /// The page prot global finalize chip.
-    PageProtGlobalFinalize = 122,
+    PageProtGlobalFinalize = 124,
+    /// The trap exec chip.
+    #[subenum(CoreAirId)]
+    TrapExec = 125,
+    /// The trap memory chip.
+    #[subenum(CoreAirId)]
+    TrapMem = 126,
 }
 
 impl RiscvAirId {
@@ -403,10 +414,13 @@ impl RiscvAirId {
             RiscvAirId::PageProtLocal,
             RiscvAirId::SyscallCore,
             RiscvAirId::SyscallInstrs,
+            RiscvAirId::SyscallInstrsUser,
             RiscvAirId::Global,
             RiscvAirId::Mprotect,
             RiscvAirId::InstructionDecode,
             RiscvAirId::InstructionFetch,
+            RiscvAirId::TrapExec,
+            RiscvAirId::TrapMem,
         ]
     }
 
@@ -461,6 +475,7 @@ impl RiscvAirId {
                 | RiscvAirId::Bn254Fp2MulAssign
                 | RiscvAirId::Bls12381Decompress
                 | RiscvAirId::Poseidon2
+                | RiscvAirId::SigReturn
         )
     }
 

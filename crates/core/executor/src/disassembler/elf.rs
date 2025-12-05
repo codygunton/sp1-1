@@ -52,6 +52,7 @@ pub(crate) struct Elf {
 impl Elf {
     /// Create a new [Elf].
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         instructions: Vec<u32>,
         pc_start: u64,

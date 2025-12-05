@@ -271,17 +271,8 @@ impl<E: EllipticCurve + EdwardsParameters, M: TrustMode> EdAddAssignChip<E, M> {
 
         Self::populate_field_ops(blu, cols, p_x, p_y, q_x, q_y);
 
-        // Populate the memory access columns.
-        for i in 0..WORDS_CURVE_POINT {
-            let record = MemoryRecordEnum::Read(event.q_memory_records[i]);
-            cols.q_addrs_add[i].populate(blu, event.q_ptr, i as u64 * 8);
-            cols.q_access[i].populate(record, blu);
-        }
-        for i in 0..WORDS_CURVE_POINT {
-            let record = MemoryRecordEnum::Write(event.p_memory_records[i]);
-            cols.p_addrs_add[i].populate(blu, event.p_ptr, i as u64 * 8);
-            cols.p_access[i].populate(record, blu);
-        }
+        let mut is_not_trap = true;
+        let mut trap_code = 0;
 
         if !M::IS_TRUSTED {
             let cols: &mut EdAddAssignCols<F, UserMode> =
@@ -292,9 +283,9 @@ impl<E: EllipticCurve + EdwardsParameters, M: TrustMode> EdAddAssignChip<E, M> {
                 event.q_ptr + 8 * (WORDS_CURVE_POINT - 1) as u64,
                 event.clk,
                 PROT_READ,
-                &event.page_prot_records.read_page_prot_records[0],
-                &event.page_prot_records.read_page_prot_records.get(1).copied(),
-                1,
+                &event.page_prot_records.read_page_prot_records,
+                &mut is_not_trap,
+                &mut trap_code,
             );
 
             cols.write_slice_page_prot_access.populate(
@@ -303,10 +294,25 @@ impl<E: EllipticCurve + EdwardsParameters, M: TrustMode> EdAddAssignChip<E, M> {
                 event.p_ptr + 8 * (WORDS_CURVE_POINT - 1) as u64,
                 event.clk + 1,
                 PROT_READ | PROT_WRITE,
-                &event.page_prot_records.write_page_prot_records[0],
-                &event.page_prot_records.write_page_prot_records.get(1).copied(),
-                1,
+                &event.page_prot_records.write_page_prot_records,
+                &mut is_not_trap,
+                &mut trap_code,
             );
+        }
+
+        // Populate the memory access columns.
+        for i in 0..WORDS_CURVE_POINT {
+            cols.q_addrs_add[i].populate(blu, event.q_ptr, i as u64 * 8);
+            cols.p_addrs_add[i].populate(blu, event.p_ptr, i as u64 * 8);
+            if is_not_trap {
+                let q_record = MemoryRecordEnum::Read(event.q_memory_records[i]);
+                cols.q_access[i].populate(q_record, blu);
+                let p_record = MemoryRecordEnum::Write(event.p_memory_records[i]);
+                cols.p_access[i].populate(p_record, blu);
+            } else {
+                cols.q_access[i] = MemoryAccessColsU8::default();
+                cols.p_access[i] = MemoryAccessColsU8::default();
+            }
         }
     }
 }
@@ -330,16 +336,48 @@ where
         let local = main.row_slice(0);
         let local: &EdAddAssignCols<AB::Var, M> = (*local).borrow();
 
-        let x1_limbs = builder.generate_limbs(&local.p_access[0..4], local.is_real.into());
+        let mut is_not_trap = local.is_real.into();
+        let mut trap_code = AB::Expr::zero();
+
+        if !M::IS_TRUSTED {
+            let local = main.row_slice(0);
+            let local: &EdAddAssignCols<AB::Var, UserMode> = (*local).borrow();
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into(),
+                &local.q_ptr.addr.map(Into::into),
+                &local.q_addrs_add[WORDS_CURVE_POINT - 1].value.map(Into::into),
+                PROT_READ,
+                &local.read_slice_page_prot_access,
+                &mut is_not_trap,
+                &mut trap_code,
+            );
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into() + AB::Expr::one(),
+                &local.p_ptr.addr.map(Into::into),
+                &local.p_addrs_add[WORDS_CURVE_POINT - 1].value.map(Into::into),
+                PROT_READ | PROT_WRITE,
+                &local.write_slice_page_prot_access,
+                &mut is_not_trap,
+                &mut trap_code,
+            );
+        }
+
+        let x1_limbs = builder.generate_limbs(&local.p_access[0..4], is_not_trap.clone());
         let x1: Limbs<AB::Expr, <Ed25519BaseField as NumLimbs>::Limbs> =
             Limbs(x1_limbs.try_into().expect("failed to convert limbs"));
-        let x2_limbs = builder.generate_limbs(&local.q_access[0..4], local.is_real.into());
+        let x2_limbs = builder.generate_limbs(&local.q_access[0..4], is_not_trap.clone());
         let x2: Limbs<AB::Expr, <Ed25519BaseField as NumLimbs>::Limbs> =
             Limbs(x2_limbs.try_into().expect("failed to convert limbs"));
-        let y1_limbs = builder.generate_limbs(&local.p_access[4..8], local.is_real.into());
+        let y1_limbs = builder.generate_limbs(&local.p_access[4..8], is_not_trap.clone());
         let y1: Limbs<AB::Expr, <Ed25519BaseField as NumLimbs>::Limbs> =
             Limbs(y1_limbs.try_into().expect("failed to convert limbs"));
-        let y2_limbs = builder.generate_limbs(&local.q_access[4..8], local.is_real.into());
+        let y2_limbs = builder.generate_limbs(&local.q_access[4..8], is_not_trap.clone());
         let y2: Limbs<AB::Expr, <Ed25519BaseField as NumLimbs>::Limbs> =
             Limbs(y2_limbs.try_into().expect("failed to convert limbs"));
 
@@ -424,7 +462,7 @@ where
             local.clk_low,
             &local.q_addrs_add.map(|addr| addr.value.map(Into::into)),
             &local.q_access.iter().map(|access| access.memory_access).collect_vec(),
-            local.is_real,
+            is_not_trap.clone(),
         );
 
         builder.eval_memory_access_slice_write(
@@ -433,13 +471,14 @@ where
             &local.p_addrs_add.map(|addr| addr.value.map(Into::into)),
             &local.p_access.iter().map(|access| access.memory_access).collect_vec(),
             result_words,
-            local.is_real,
+            is_not_trap.clone(),
         );
 
         builder.receive_syscall(
             local.clk_high,
             local.clk_low,
             AB::F::from_canonical_u32(SyscallCode::ED_ADD.syscall_id()),
+            trap_code.clone(),
             p_ptr.map(Into::into),
             q_ptr.map(Into::into),
             local.is_real,
@@ -450,33 +489,6 @@ where
             builder.extract_public_values().is_untrusted_programs_enabled,
             AB::Expr::from_bool(!M::IS_TRUSTED),
         );
-
-        if !M::IS_TRUSTED {
-            let local = main.row_slice(0);
-            let local: &EdAddAssignCols<AB::Var, UserMode> = (*local).borrow();
-
-            AddressSlicePageProtOperation::<AB::F>::eval(
-                builder,
-                local.clk_high.into(),
-                local.clk_low.into(),
-                &local.q_ptr.addr.map(Into::into),
-                &local.q_addrs_add[WORDS_CURVE_POINT - 1].value.map(Into::into),
-                AB::Expr::from_canonical_u8(PROT_READ),
-                &local.read_slice_page_prot_access,
-                local.is_real.into(),
-            );
-
-            AddressSlicePageProtOperation::<AB::F>::eval(
-                builder,
-                local.clk_high.into(),
-                local.clk_low.into() + AB::Expr::one(),
-                &local.p_ptr.addr.map(Into::into),
-                &local.p_addrs_add[WORDS_CURVE_POINT - 1].value.map(Into::into),
-                AB::Expr::from_canonical_u8(PROT_READ | PROT_WRITE),
-                &local.write_slice_page_prot_access,
-                local.is_real.into(),
-            );
-        }
     }
 }
 

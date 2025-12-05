@@ -101,17 +101,23 @@ impl<T: Copy> MaybeCowMemory<T> {
 
 /// A page prot, which can be in either owned or COW mode.
 pub enum MaybeCowPageProt {
-    Cow { copy: HashMap<u64, PageProtValue>, original: HashMap<u64, PageProtValue> },
-    Owned { page_prot: HashMap<u64, PageProtValue> },
+    /// `HashMap` for page protection in COW mode.
+    Cow {
+        /// The copy of the `HashMap`.
+        copy: HashMap<u64, PageProtValue>,
+        /// The original `HashMap`.
+        original: HashMap<u64, PageProtValue>,
+    },
+    /// `HashMap` for page protection in owned mode.
+    Owned {
+        /// The page protection status for each page.
+        page_prot: HashMap<u64, PageProtValue>,
+    },
 }
 
 impl MaybeCowPageProt {
-    /// Create a new owned page prot.
-    pub fn new_owned() -> Self {
-        Self::Owned { page_prot: HashMap::default() }
-    }
-
     /// Create a new cow page prot.
+    #[must_use]
     pub fn new_cow(original: HashMap<u64, PageProtValue>) -> Self {
         Self::Cow { copy: HashMap::default(), original }
     }
@@ -160,6 +166,7 @@ impl MaybeCowPageProt {
     }
 
     /// Get a value from the page prot.
+    #[must_use]
     pub fn get(&self, page_idx: u64) -> Option<&PageProtValue> {
         match self {
             Self::Cow { copy, original } => copy.get(&page_idx).or_else(|| original.get(&page_idx)),
@@ -175,27 +182,11 @@ impl MaybeCowPageProt {
         }
     }
 
-    /// Get the length of the page prot.
-    pub fn len(&self) -> usize {
-        match self {
-            Self::Cow { copy, original } => copy.len() + original.len(),
-            Self::Owned { page_prot } => page_prot.len(),
-        }
-    }
-
     /// Get a view of the keys of the page prot.
     pub fn keys(&self) -> impl Iterator<Item = &u64> {
         match self {
             Self::Cow { copy: _, original: _ } => unreachable!("Can't get keys of a cow page prot"),
             Self::Owned { page_prot } => page_prot.keys(),
-        }
-    }
-
-    /// Check if the page prot is empty.
-    pub fn is_empty(&self) -> bool {
-        match self {
-            Self::Cow { copy, original } => copy.is_empty() && original.is_empty(),
-            Self::Owned { page_prot } => page_prot.is_empty(),
         }
     }
 }
