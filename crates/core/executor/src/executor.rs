@@ -639,6 +639,7 @@ impl<'a> Executor<'a> {
     ) -> PageProtRecord {
         let page_prot_record = self.state.page_prots.entry(page_idx).or_insert(PageProtRecord {
             external_flag,
+            page_idx,
             timestamp: 0,
             page_prot: DEFAULT_PAGE_PROT,
         });
@@ -2268,6 +2269,7 @@ impl<'a> Executor<'a> {
                         &self.costs,
                         self.program_len,
                         &self.internal_syscalls_air_id,
+                        self.program.enable_untrusted_programs,
                     );
 
                     if padded_element_count > element_threshold || max_height > height_threshold {
@@ -2343,6 +2345,7 @@ impl<'a> Executor<'a> {
             &self.costs,
             self.program_len,
             &self.internal_syscalls_air_id,
+            self.program.enable_untrusted_programs,
         )
         .0;
         self.local_counts = LocalCounts::default();
@@ -2470,7 +2473,12 @@ impl<'a> Executor<'a> {
             for (&page_idx, page_prot) in &self.program.page_prot_image {
                 self.state.page_prots.insert(
                     page_idx,
-                    PageProtRecord { external_flag: false, timestamp: 0, page_prot: *page_prot },
+                    PageProtRecord {
+                        external_flag: false,
+                        page_idx,
+                        timestamp: 0,
+                        page_prot: *page_prot,
+                    },
                 );
             }
         }

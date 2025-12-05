@@ -19,16 +19,19 @@ pub(crate) fn weierstrass_double<'a, RT: SyscallRuntime<'a>, E: EllipticCurve>(
 
     let p = rt.mr_slice_unsafe(num_words);
 
-    let p_memory_records = rt.mw_slice(p_ptr, num_words);
+    let (p_memory_records, p_page_prot_records) = rt.mw_slice(p_ptr, num_words);
 
     if RT::TRACING {
+        let (local_mem_access, local_page_prot_access) = rt.postprocess_precompile();
+
         let event = EllipticCurveDoubleEvent {
             clk,
             p_ptr,
             p,
             p_memory_records,
-            local_mem_access: rt.postprocess_precompile(),
-            ..Default::default()
+            local_mem_access,
+            write_slice_page_prot_access: p_page_prot_records,
+            local_page_prot_access,
         };
 
         let syscall_event = rt.syscall_event(

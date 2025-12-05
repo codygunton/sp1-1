@@ -152,8 +152,10 @@ impl ExecutionRecord {
         proof_nonce: [u32; PROOF_NONCE_NUM_WORDS],
         global_dependencies_opt: bool,
     ) -> Self {
+        let enable_untrusted_programs = program.enable_untrusted_programs as u32;
         let mut result = Self { program, ..Default::default() };
         result.public_values.proof_nonce = proof_nonce;
+        result.public_values.is_untrusted_programs_enabled = enable_untrusted_programs;
         result.global_dependencies_opt = global_dependencies_opt;
         result
     }
@@ -366,6 +368,8 @@ impl ExecutionRecord {
                     finalize_remaining = &finalize_remaining[finalize_to_take..];
 
                     // Ensure last record has same proof nonce as other shards
+                    mem_record_ref.public_values.is_untrusted_programs_enabled =
+                        self.public_values.is_untrusted_programs_enabled;
                     mem_record_ref.public_values.proof_nonce = self.public_values.proof_nonce;
                     mem_record_ref.global_dependencies_opt = self.global_dependencies_opt;
 
@@ -424,6 +428,8 @@ impl ExecutionRecord {
                 }
                 mem_record_ref.public_values.last_finalize_addr = finalize_addr;
 
+                mem_record_ref.public_values.is_untrusted_programs_enabled =
+                    self.public_values.is_untrusted_programs_enabled;
                 mem_record_ref.public_values.proof_nonce = self.public_values.proof_nonce;
                 mem_record_ref.global_dependencies_opt = self.global_dependencies_opt;
 

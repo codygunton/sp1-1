@@ -3,6 +3,8 @@ use std::{marker::PhantomData, sync::Arc};
 use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
 
+use sp1_primitives::consts::DEFAULT_PAGE_PROT;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum RiscRegister {
@@ -115,6 +117,33 @@ impl From<u64> for RiscOperand {
 pub struct MemValue {
     pub clk: u64,
     pub value: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PageProtValue {
+    pub timestamp: u64,
+    pub value: u8,
+}
+
+impl Default for PageProtValue {
+    fn default() -> Self {
+        Self { timestamp: 0, value: DEFAULT_PAGE_PROT }
+    }
+}
+
+// PageProtValue shares similar structure with MemValue. For simplicity, we will
+// wrap PageProtValue in MemValue when building traces.
+impl From<PageProtValue> for MemValue {
+    fn from(v: PageProtValue) -> MemValue {
+        MemValue { clk: v.timestamp, value: v.value as u64 }
+    }
+}
+
+impl From<MemValue> for PageProtValue {
+    fn from(v: MemValue) -> PageProtValue {
+        assert!(v.value & !0xff == 0, "value = {:x}", v.value);
+        PageProtValue { timestamp: v.clk, value: (v.value & 0xff).try_into().unwrap() }
+    }
 }
 
 /// A convience structure for getting offsets of fields in the actual [TraceChunk].

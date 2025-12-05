@@ -1,5 +1,5 @@
 use crate::{
-    events::{PrecompileEvent, Uint256OpsEvent},
+    events::{PrecompileEvent, Uint256OpsEvent, Uint256OpsPageProtRecords},
     syscalls::SyscallCode,
     vm::syscall::SyscallRuntime,
 };
@@ -14,6 +14,7 @@ pub(crate) fn uint256_ops<'a, RT: SyscallRuntime<'a>>(
     arg2: u64,
 ) -> Option<u64> {
     let clk = rt.core().clk();
+
     let op = syscall_code.uint256_op_map();
 
     // Read addresses - arg1 and arg2 come from the syscall, others from registers
@@ -27,26 +28,28 @@ pub(crate) fn uint256_ops<'a, RT: SyscallRuntime<'a>>(
     let e_ptr = e_ptr_memory.value;
 
     // Read input values (8 words = 32 bytes each for uint256) and convert to BigUint
-    let a_memory_records = rt.mr_slice(a_ptr, U256_NUM_WORDS);
+    let (a_memory_records, a_page_prot_records) = rt.mr_slice(a_ptr, U256_NUM_WORDS);
     rt.increment_clk();
     let a: Vec<_> = a_memory_records.iter().map(|record| record.value).collect();
-    let b_memory_records = rt.mr_slice(b_ptr, U256_NUM_WORDS);
+    let (b_memory_records, b_page_prot_records) = rt.mr_slice(b_ptr, U256_NUM_WORDS);
     rt.increment_clk();
     let b: Vec<_> = b_memory_records.iter().map(|record| record.value).collect();
-    let c_memory_records = rt.mr_slice(c_ptr, U256_NUM_WORDS);
+    let (c_memory_records, c_page_prot_records) = rt.mr_slice(c_ptr, U256_NUM_WORDS);
     let c: Vec<_> = c_memory_records.iter().map(|record| record.value).collect();
 
     rt.increment_clk();
 
-    let d_memory_records = rt.mw_slice(d_ptr, U256_NUM_WORDS);
+    let (d_memory_records, d_page_prot_records) = rt.mw_slice(d_ptr, U256_NUM_WORDS);
     let d: Vec<_> = d_memory_records.iter().map(|record| record.value).collect();
 
     rt.increment_clk();
 
-    let e_memory_records = rt.mw_slice(e_ptr, U256_NUM_WORDS);
+    let (e_memory_records, e_page_prot_records) = rt.mw_slice(e_ptr, U256_NUM_WORDS);
     let e: Vec<_> = e_memory_records.iter().map(|record| record.value).collect();
 
     if RT::TRACING {
+        let (local_mem_access, local_page_prot_access) = rt.postprocess_precompile();
+
         let event = PrecompileEvent::Uint256Ops(Uint256OpsEvent {
             clk,
             op,
@@ -68,8 +71,15 @@ pub(crate) fn uint256_ops<'a, RT: SyscallRuntime<'a>>(
             c_memory_records,
             d_memory_records,
             e_memory_records,
-            local_mem_access: rt.postprocess_precompile(),
-            ..Default::default()
+            local_mem_access,
+            page_prot_records: Uint256OpsPageProtRecords {
+                read_a_page_prot_records: a_page_prot_records,
+                read_b_page_prot_records: b_page_prot_records,
+                read_c_page_prot_records: c_page_prot_records,
+                write_d_page_prot_records: d_page_prot_records,
+                write_e_page_prot_records: e_page_prot_records,
+            },
+            local_page_prot_access,
         });
 
         let syscall_event = rt.syscall_event(

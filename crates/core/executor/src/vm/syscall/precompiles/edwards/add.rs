@@ -1,7 +1,7 @@
 use sp1_curves::{edwards::EdwardsParameters, params::NumWords, EllipticCurve};
 
 use crate::{
-    events::{EllipticCurveAddEvent, PrecompileEvent},
+    events::{EllipticCurveAddEvent, EllipticCurvePageProtRecords, PrecompileEvent},
     syscalls::SyscallCode,
     vm::syscall::SyscallRuntime,
 };
@@ -28,23 +28,31 @@ pub(crate) fn edwards_add<'a, RT: SyscallRuntime<'a>, E: EllipticCurve + Edwards
 
     // Accessed via slice unsafe, so ununsed.
     let p: Vec<u64> = rt.mr_slice_unsafe(num_words);
-    let q_memory_records = rt.mr_slice(q_ptr, num_words);
+
+    let (q_memory_records, q_page_prot_records) = rt.mr_slice(q_ptr, num_words);
+    let q = q_memory_records.iter().map(|r| r.value).collect::<Vec<_>>();
 
     rt.increment_clk();
 
-    let write_record = rt.mw_slice(p_ptr, num_words);
+    let (write_record, write_page_prot_records) = rt.mw_slice(p_ptr, num_words);
 
     if RT::TRACING {
+        let (local_mem_access, local_page_prot_access) = rt.postprocess_precompile();
+
         let event = EllipticCurveAddEvent {
             clk,
             p_ptr,
             p,
             q_ptr,
-            q: q_memory_records.iter().map(|r| r.value).collect::<Vec<_>>(),
+            q,
             p_memory_records: write_record,
             q_memory_records,
-            local_mem_access: rt.postprocess_precompile(),
-            ..Default::default()
+            local_mem_access,
+            page_prot_records: EllipticCurvePageProtRecords {
+                read_page_prot_records: q_page_prot_records,
+                write_page_prot_records,
+            },
+            local_page_prot_access,
         };
 
         let syscall_event = rt.syscall_event(

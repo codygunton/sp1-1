@@ -23,6 +23,7 @@ pub fn mprotect_syscall<E: ExecutorConfig>(
 
     let page_prot = ctx.rt.state.page_prots.entry(page_prot_page_idx).or_insert(PageProtRecord {
         external_flag: ctx.external_flag,
+        page_idx: page_prot_page_idx,
         timestamp: 0,
         page_prot: DEFAULT_PAGE_PROT,
     });
@@ -30,6 +31,7 @@ pub fn mprotect_syscall<E: ExecutorConfig>(
     // Create the initial page protection record for the local event
     let initial_page_prot_access = PageProtRecord {
         external_flag: page_prot.external_flag,
+        page_idx: page_prot_page_idx,
         timestamp: page_prot.timestamp,
         page_prot: page_prot.page_prot,
     };
@@ -37,6 +39,7 @@ pub fn mprotect_syscall<E: ExecutorConfig>(
     // Create the final page protection record for the local event
     let final_page_prot_access = PageProtRecord {
         external_flag: ctx.external_flag,
+        page_idx: page_prot_page_idx,
         timestamp: ctx.rt.state.clk,
         page_prot: prot,
     };

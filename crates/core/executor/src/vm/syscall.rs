@@ -1,9 +1,10 @@
 use crate::{
     events::{
-        MemoryLocalEvent, MemoryReadRecord, MemoryWriteRecord, PrecompileEvent, SyscallEvent,
+        MemoryLocalEvent, MemoryReadRecord, MemoryWriteRecord, PageProtLocalEvent, PageProtRecord,
+        PrecompileEvent, SyscallEvent,
     },
     syscalls::SyscallCode,
-    ExecutionRecord,
+    ExecutionRecord, Register,
 };
 use sp1_curves::{
     edwards::ed25519::Ed25519,
@@ -14,6 +15,8 @@ use sp1_curves::{
         secp256r1::Secp256r1,
     },
 };
+use sp1_jit::PageProtValue;
+use sp1_primitives::consts::{LOG_PAGE_SIZE, PROT_READ, PROT_WRITE};
 
 use super::CoreVM;
 
@@ -21,6 +24,7 @@ mod commit;
 mod deferred;
 mod halt;
 mod hint;
+mod mprotect;
 mod poseidon2;
 mod precompiles;
 mod u256x2048_mul;
@@ -72,33 +76,114 @@ pub trait SyscallRuntime<'a> {
     }
 
     /// Postprocess the precompile memory access.
-    fn postprocess_precompile(&mut self) -> Vec<MemoryLocalEvent> {
+    fn postprocess_precompile(&mut self) -> (Vec<MemoryLocalEvent>, Vec<PageProtLocalEvent>) {
         unreachable!(
             "SyscallRuntime::postprocess_precompile is not intended to be called by default."
         );
     }
 
-    fn mr(&mut self, addr: u64) -> MemoryReadRecord {
-        let core = self.core_mut();
-        let clk = core.clk();
+    /// Update page permission, returns the old permission(for tracing)
+    fn page_prot_write(&mut self, page_idx: u64, _prot: u8) -> PageProtRecord {
+        let addr = page_idx << LOG_PAGE_SIZE;
+        assert!(
+            self.core().program.untrusted_memory.is_some_and(|(s, e)| addr >= s && addr < e),
+            "untrusted mode must be turned on, the requested page must be in untrusted memory region",
+        );
 
+        let mem_writes = self.core_mut().mem_reads();
+        let prev_value: PageProtValue =
+            mem_writes.next().expect("Precompile memory read out of bounds").into();
+        PageProtRecord {
+            external_flag: false,
+            page_idx,
+            timestamp: prev_value.timestamp,
+            page_prot: prev_value.value,
+        }
+    }
+
+    /// Check page permission for a slice of pages
+    #[inline]
+    fn page_prot_range_check(
+        &mut self,
+        start_page_idx: u64,
+        end_page_idx: u64,
+        page_prot_bitmap: u8,
+    ) -> Vec<PageProtRecord> {
+        let mut records = Vec::new();
+        for page_idx in start_page_idx..=end_page_idx {
+            if let Some(record) = self.page_prot_check(page_idx, page_prot_bitmap) {
+                records.push(record);
+            }
+        }
+        records
+    }
+
+    #[inline]
+    fn page_prot_check(&mut self, page_idx: u64, page_prot_bitmap: u8) -> Option<PageProtRecord> {
+        if self.core().program.enable_untrusted_programs {
+            let mem_writes = self.core_mut().mem_reads();
+            let prot_value: PageProtValue =
+                mem_writes.next().expect("Precompile memory read out of bounds").into();
+            assert!(prot_value.value & page_prot_bitmap == page_prot_bitmap);
+            Some(PageProtRecord {
+                external_flag: false,
+                page_idx,
+                timestamp: prot_value.timestamp,
+                page_prot: prot_value.value,
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn mr(&mut self, addr: u64) -> MemoryReadRecord {
+        self.core_mut().mr_instr(addr, PROT_READ, None)
+    }
+
+    #[inline]
+    fn mr_without_prot(&mut self, addr: u64) -> MemoryReadRecord {
         #[allow(clippy::manual_let_else)]
-        let record = match core.mem_reads.next() {
+        let record = match self.core_mut().mem_reads.next() {
             Some(next) => next,
             None => {
-                unreachable!("memory reads unexpectdely exhausted at {addr}, clk {}", clk);
+                unreachable!(
+                    "memory reads unexpectdely exhausted at {addr}, clk {}",
+                    self.core().clk()
+                );
             }
         };
 
         MemoryReadRecord {
             value: record.value,
-            timestamp: clk,
+            timestamp: self.core().clk(),
             prev_timestamp: record.clk,
             prev_page_prot_record: None,
         }
     }
 
-    fn mw(&mut self, _addr: u64) -> MemoryWriteRecord {
+    #[inline]
+    fn mw(&mut self, addr: u64) -> MemoryWriteRecord {
+        let prev_page_prot_record = self.page_prot_check(addr >> LOG_PAGE_SIZE, PROT_WRITE);
+
+        let mem_writes = self.core_mut().mem_reads();
+
+        let old = mem_writes.next().expect("Precompile memory read out of bounds");
+        let new = mem_writes.next().expect("Precompile memory read out of bounds");
+
+        let record = MemoryWriteRecord {
+            prev_timestamp: old.clk,
+            prev_value: old.value,
+            timestamp: self.core().clk(),
+            value: new.value,
+            prev_page_prot_record,
+        };
+
+        record
+    }
+
+    #[inline]
+    fn mw_without_prot(&mut self, _addr: u64) -> MemoryWriteRecord {
         let mem_writes = self.core_mut().mem_reads();
 
         let old = mem_writes.next().expect("Precompile memory read out of bounds");
@@ -115,20 +200,68 @@ pub trait SyscallRuntime<'a> {
         record
     }
 
-    fn mr_slice(&mut self, addr: u64, len: usize) -> Vec<MemoryReadRecord> {
-        self.core_mut().mr_slice(addr, len)
+    #[inline]
+    fn mr_slice(&mut self, addr: u64, len: usize) -> (Vec<MemoryReadRecord>, Vec<PageProtRecord>) {
+        let first_page_idx = addr >> LOG_PAGE_SIZE;
+        let last_page_idx = (addr + (len - 1) as u64 * 8) >> LOG_PAGE_SIZE;
+        let page_prot_records =
+            self.page_prot_range_check(first_page_idx, last_page_idx, PROT_READ);
+
+        let current_clk = self.core().clk();
+        let mem_reads = self.core_mut().mem_reads();
+
+        let records: Vec<MemoryReadRecord> = mem_reads
+            .take(len)
+            .map(|value| MemoryReadRecord {
+                value: value.value,
+                timestamp: current_clk,
+                prev_timestamp: value.clk,
+                prev_page_prot_record: None,
+            })
+            .collect();
+
+        (records, page_prot_records)
     }
 
-    fn mw_slice(&mut self, addr: u64, len: usize) -> Vec<MemoryWriteRecord> {
-        self.core_mut().mw_slice(addr, len)
+    fn mw_slice(&mut self, addr: u64, len: usize) -> (Vec<MemoryWriteRecord>, Vec<PageProtRecord>) {
+        let first_page_idx = addr >> LOG_PAGE_SIZE;
+        let last_page_idx = (addr + (len - 1) as u64 * 8) >> LOG_PAGE_SIZE;
+        let page_prot_records =
+            self.page_prot_range_check(first_page_idx, last_page_idx, PROT_WRITE);
+
+        let mem_writes = self.core_mut().mem_reads();
+
+        let raw_records: Vec<_> = mem_writes.take(len * 2).collect();
+        let records: Vec<MemoryWriteRecord> = raw_records
+            .chunks(2)
+            .map(|chunk| {
+                #[allow(clippy::manual_let_else)]
+                let (old, new) = match (chunk.first(), chunk.last()) {
+                    (Some(old), Some(new)) => (old, new),
+                    _ => unreachable!("Precompile memory write out of bounds"),
+                };
+
+                MemoryWriteRecord {
+                    prev_timestamp: old.clk,
+                    prev_value: old.value,
+                    timestamp: new.clk,
+                    value: new.value,
+                    prev_page_prot_record: None,
+                }
+            })
+            .collect();
+
+        (records, page_prot_records)
     }
 
     fn mr_slice_unsafe(&mut self, len: usize) -> Vec<u64> {
-        self.core_mut().mr_slice_unsafe(len)
+        let mem_reads = self.core_mut().mem_reads();
+
+        mem_reads.take(len).map(|value| value.value).collect()
     }
 
     fn rr(&mut self, register: usize) -> MemoryReadRecord {
-        self.core_mut().rr_precompile(register)
+        self.core_mut().rr(Register::from_u8(register as u8), None)
     }
 }
 
@@ -226,9 +359,9 @@ pub(crate) fn sp1_ecall_handler<'a, RT: SyscallRuntime<'a>>(
         SyscallCode::BN254_FP_ADD | SyscallCode::BN254_FP_SUB | SyscallCode::BN254_FP_MUL => {
             precompiles::fptower::fp_op::<_, Bn254BaseField>(rt, code, args1, args2)
         }
+        SyscallCode::MPROTECT => mprotect::mprotect(rt, code, args1, args2),
         SyscallCode::POSEIDON2 => poseidon2::poseidon2(rt, code, args1, args2),
         SyscallCode::VERIFY_SP1_PROOF
-        | SyscallCode::MPROTECT
         | SyscallCode::WRITE
         | SyscallCode::ENTER_UNCONSTRAINED
         | SyscallCode::EXIT_UNCONSTRAINED

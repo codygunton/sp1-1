@@ -3,13 +3,13 @@ use sp1_jit::MinimalTrace;
 use std::sync::Arc;
 
 use crate::{
-    events::{MemoryReadRecord, MemoryWriteRecord},
+    events::{MemoryReadRecord, MemoryWriteRecord, PageProtRecord},
     syscalls::SyscallCode,
     vm::{
         gas::ReportGenerator,
         results::{
-            AluResult, BranchResult, CycleResult, JumpResult, LoadResult, MaybeImmediate,
-            StoreResult, UTypeResult,
+            AluResult, BranchResult, CycleResult, FetchResult, JumpResult, LoadResult,
+            MaybeImmediate, StoreResult, UTypeResult,
         },
         syscall::SyscallRuntime,
         CoreVM,
@@ -46,13 +46,13 @@ impl GasEstimatingVM<'_> {
 
     /// Execute the next instruction at the current PC.
     pub fn execute_instruction(&mut self) -> Result<CycleResult, ExecutionError> {
-        let instruction = self.core.fetch();
+        let FetchResult { instruction, .. } = self.core.fetch()?;
         if instruction.is_none() {
             unreachable!("Fetching the next instruction failed");
         }
 
         // SAFETY: The instruction is guaranteed to be valid as we checked for `is_none` above.
-        let instruction = unsafe { *instruction.unwrap_unchecked() };
+        let instruction = unsafe { instruction.unwrap_unchecked() };
 
         match &instruction.opcode {
             Opcode::ADD
@@ -305,24 +305,24 @@ impl<'a> SyscallRuntime<'a> for GasEstimatingVM<'a> {
         record
     }
 
-    fn mw_slice(&mut self, addr: u64, len: usize) -> Vec<MemoryWriteRecord> {
-        let records = SyscallRuntime::mw_slice(self.core_mut(), addr, len);
+    fn mw_slice(&mut self, addr: u64, len: usize) -> (Vec<MemoryWriteRecord>, Vec<PageProtRecord>) {
+        let (records, prot_records) = SyscallRuntime::mw_slice(self.core_mut(), addr, len);
 
         for (i, record) in records.iter().enumerate() {
             self.gas_calculator.handle_mem_event(addr + i as u64 * 8, record.prev_timestamp);
         }
 
-        records
+        (records, prot_records)
     }
 
-    fn mr_slice(&mut self, addr: u64, len: usize) -> Vec<MemoryReadRecord> {
-        let records = SyscallRuntime::mr_slice(self.core_mut(), addr, len);
+    fn mr_slice(&mut self, addr: u64, len: usize) -> (Vec<MemoryReadRecord>, Vec<PageProtRecord>) {
+        let (records, prot_records) = SyscallRuntime::mr_slice(self.core_mut(), addr, len);
 
         for (i, record) in records.iter().enumerate() {
             self.gas_calculator.handle_mem_event(addr + i as u64 * 8, record.prev_timestamp);
         }
 
-        records
+        (records, prot_records)
     }
 
     fn rr(&mut self, register: usize) -> MemoryReadRecord {

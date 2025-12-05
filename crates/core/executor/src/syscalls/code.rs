@@ -336,6 +336,59 @@ impl SyscallCode {
         })
     }
 
+    /// Get the ID of the AIR used in the syscall implementation in the user mode.
+    #[must_use]
+    pub fn as_air_id_user(self) -> Option<RiscvAirId> {
+        Some(match self {
+            SyscallCode::SHA_EXTEND => RiscvAirId::ShaExtend,
+            SyscallCode::SHA_COMPRESS => RiscvAirId::ShaCompress,
+            SyscallCode::ED_ADD => RiscvAirId::EdAddAssignUser,
+            SyscallCode::ED_DECOMPRESS => RiscvAirId::EdDecompressUser,
+            SyscallCode::KECCAK_PERMUTE => RiscvAirId::KeccakPermute,
+            SyscallCode::SECP256K1_ADD => RiscvAirId::Secp256k1AddAssignUser,
+            SyscallCode::SECP256K1_DOUBLE => RiscvAirId::Secp256k1DoubleAssignUser,
+            SyscallCode::SECP256K1_DECOMPRESS => RiscvAirId::Secp256k1DecompressUser,
+            SyscallCode::BN254_ADD => RiscvAirId::Bn254AddAssignUser,
+            SyscallCode::BN254_DOUBLE => RiscvAirId::Bn254DoubleAssignUser,
+            SyscallCode::BLS12381_DECOMPRESS => RiscvAirId::Bls12381DecompressUser,
+            SyscallCode::UINT256_MUL => RiscvAirId::Uint256MulModUser,
+            SyscallCode::U256XU2048_MUL => RiscvAirId::U256XU2048MulUser,
+            SyscallCode::BLS12381_ADD => RiscvAirId::Bls12381AddAssignUser,
+            SyscallCode::BLS12381_DOUBLE => RiscvAirId::Bls12381DoubleAssignUser,
+            SyscallCode::BLS12381_FP_ADD
+            | SyscallCode::BLS12381_FP_SUB
+            | SyscallCode::BLS12381_FP_MUL => RiscvAirId::Bls12381FpOpAssignUser,
+            SyscallCode::BLS12381_FP2_ADD | SyscallCode::BLS12381_FP2_SUB => {
+                RiscvAirId::Bls12381Fp2AddSubAssignUser
+            }
+            SyscallCode::BLS12381_FP2_MUL => RiscvAirId::Bls12381Fp2MulAssignUser,
+            SyscallCode::BN254_FP_ADD | SyscallCode::BN254_FP_SUB | SyscallCode::BN254_FP_MUL => {
+                RiscvAirId::Bn254FpOpAssignUser
+            }
+            SyscallCode::BN254_FP2_ADD | SyscallCode::BN254_FP2_SUB => {
+                RiscvAirId::Bn254Fp2AddSubAssignUser
+            }
+            SyscallCode::BN254_FP2_MUL => RiscvAirId::Bn254Fp2MulAssignUser,
+            SyscallCode::SECP256R1_ADD => RiscvAirId::Secp256r1AddAssignUser,
+            SyscallCode::SECP256R1_DOUBLE => RiscvAirId::Secp256r1DoubleAssignUser,
+            SyscallCode::SECP256R1_DECOMPRESS => RiscvAirId::Secp256r1DecompressUser,
+            SyscallCode::UINT256_ADD_CARRY | SyscallCode::UINT256_MUL_CARRY => {
+                RiscvAirId::Uint256OpsUser
+            }
+            SyscallCode::MPROTECT => RiscvAirId::Mprotect,
+            SyscallCode::POSEIDON2 => RiscvAirId::Poseidon2User,
+            SyscallCode::HALT
+            | SyscallCode::WRITE
+            | SyscallCode::ENTER_UNCONSTRAINED
+            | SyscallCode::EXIT_UNCONSTRAINED
+            | SyscallCode::COMMIT
+            | SyscallCode::COMMIT_DEFERRED_PROOFS
+            | SyscallCode::VERIFY_SP1_PROOF
+            | SyscallCode::HINT_LEN
+            | SyscallCode::HINT_READ => return None,
+        })
+    }
+
     /// The maximum number of touched words for each syscall code.
     #[must_use]
     #[allow(clippy::match_same_arms)]

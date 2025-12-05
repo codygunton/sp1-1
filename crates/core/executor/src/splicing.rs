@@ -3,13 +3,14 @@ use std::sync::Arc;
 use serde::Serialize;
 use sp1_hypercube::air::PROOF_NONCE_NUM_WORDS;
 use sp1_jit::{MemReads, MemValue, MinimalTrace, TraceChunk};
+use sp1_primitives::consts::LOG_PAGE_SIZE;
 
 use crate::{
-    events::{MemoryReadRecord, MemoryWriteRecord},
+    events::{MemoryReadRecord, MemoryWriteRecord, PageProtRecord},
     syscalls::SyscallCode,
     vm::{
         memory::CompressedMemory,
-        results::{CycleResult, LoadResult, StoreResult},
+        results::{CycleResult, FetchResult, LoadResult, StoreResult},
         shapes::ShapeChecker,
         syscall::SyscallRuntime,
         CoreVM,
@@ -31,6 +32,8 @@ pub struct SplicingVM<'a> {
     pub touched_addresses: &'a mut CompressedMemory,
     /// The index of the hint lens the next shard will use.
     pub hint_lens_idx: usize,
+    /// A flag indicating if running program is untrusted.
+    pub enable_untrusted_programs: bool,
 }
 
 impl SplicingVM<'_> {
@@ -63,13 +66,27 @@ impl SplicingVM<'_> {
 
     /// Execute the next instruction at the current PC.
     pub fn execute_instruction(&mut self) -> Result<CycleResult, ExecutionError> {
-        let instruction = self.core.fetch();
+        let FetchResult { instruction, mr_record, pc } = self.core.fetch()?;
         if instruction.is_none() {
             unreachable!("Fetching the next instruction failed");
         }
 
+        let mut num_page_prot_accesses = 0;
+
+        if let Some(mr_record) = mr_record {
+            let instruction_value = (mr_record.value >> ((pc % 8) * 8)) as u32;
+            self.touched_addresses.insert(pc & !0b111, true);
+            self.shape_checker.handle_untrusted_instruction(instruction_value);
+            self.shape_checker.handle_mem_event(pc & !0b111, mr_record.prev_timestamp);
+            self.shape_checker.handle_page_prot_event(
+                pc >> LOG_PAGE_SIZE,
+                mr_record.prev_page_prot_record.unwrap().timestamp,
+            );
+            num_page_prot_accesses += 1;
+        }
+
         // SAFETY: The instruction is guaranteed to be valid as we checked for `is_none` above.
-        let instruction = unsafe { *instruction.unwrap_unchecked() };
+        let instruction = unsafe { instruction.unwrap_unchecked() };
 
         match &instruction.opcode {
             Opcode::ADD
@@ -128,11 +145,16 @@ impl SplicingVM<'_> {
             }
         }
 
+        if instruction.is_memory_load_instruction() || instruction.is_memory_store_instruction() {
+            num_page_prot_accesses += self.enable_untrusted_programs as usize;
+        }
+
         self.shape_checker.handle_instruction(
             &instruction,
             self.core.needs_bump_clk_high(),
             instruction.is_memory_load_instruction() && instruction.op_a == 0,
             self.core.needs_state_bump(&instruction),
+            num_page_prot_accesses,
         );
 
         Ok(self.core.advance())
@@ -175,12 +197,20 @@ impl<'a> SplicingVM<'a> {
         opts: SP1CoreOpts,
     ) -> Self {
         let program_len = program.instructions.len() as u64;
+        let enable_untrusted_programs = program.enable_untrusted_programs;
         let sharding_threshold = opts.sharding_threshold;
+
         Self {
             core: CoreVM::new(trace, program, opts, proof_nonce),
             touched_addresses,
             hint_lens_idx: 0,
-            shape_checker: ShapeChecker::new(program_len, trace.clk_start(), sharding_threshold),
+            shape_checker: ShapeChecker::new(
+                program_len,
+                trace.clk_start(),
+                sharding_threshold,
+                enable_untrusted_programs,
+            ),
+            enable_untrusted_programs,
         }
     }
 
@@ -197,6 +227,9 @@ impl<'a> SplicingVM<'a> {
         // Ensure the address is aligned to 8 bytes.
         self.touched_addresses.insert(addr & !0b111, true);
 
+        if let Some(record) = mr_record.prev_page_prot_record {
+            self.shape_checker.handle_page_prot_event(record.page_idx, record.timestamp);
+        }
         self.shape_checker.handle_mem_event(addr, mr_record.prev_timestamp);
 
         Ok(())
@@ -215,6 +248,9 @@ impl<'a> SplicingVM<'a> {
         // Ensure the address is aligned to 8 bytes.
         self.touched_addresses.insert(addr & !0b111, true);
 
+        if let Some(record) = mw_record.prev_page_prot_record {
+            self.shape_checker.handle_page_prot_event(record.page_idx, record.timestamp);
+        }
         self.shape_checker.handle_mem_event(addr, mw_record.prev_timestamp);
 
         Ok(())
@@ -300,24 +336,30 @@ impl<'a> SyscallRuntime<'a> for SplicingVM<'a> {
         record
     }
 
-    fn mr_slice(&mut self, addr: u64, len: usize) -> Vec<MemoryReadRecord> {
-        let records = SyscallRuntime::mr_slice(self.core_mut(), addr, len);
+    fn mr_slice(&mut self, addr: u64, len: usize) -> (Vec<MemoryReadRecord>, Vec<PageProtRecord>) {
+        let (records, page_prot_records) = self.core_mut().mr_slice(addr, len);
 
+        for record in &page_prot_records {
+            self.shape_checker.handle_page_prot_event(record.page_idx, record.timestamp);
+        }
         for (i, record) in records.iter().enumerate() {
             self.shape_checker.handle_mem_event(addr + i as u64 * 8, record.prev_timestamp);
         }
 
-        records
+        (records, page_prot_records)
     }
 
-    fn mw_slice(&mut self, addr: u64, len: usize) -> Vec<MemoryWriteRecord> {
-        let records = SyscallRuntime::mw_slice(self.core_mut(), addr, len);
+    fn mw_slice(&mut self, addr: u64, len: usize) -> (Vec<MemoryWriteRecord>, Vec<PageProtRecord>) {
+        let (records, page_prot_records) = self.core_mut().mw_slice(addr, len);
 
+        for record in &page_prot_records {
+            self.shape_checker.handle_page_prot_event(record.page_idx, record.timestamp);
+        }
         for (i, record) in records.iter().enumerate() {
             self.shape_checker.handle_mem_event(addr + i as u64 * 8, record.prev_timestamp);
         }
 
-        records
+        (records, page_prot_records)
     }
 }
 

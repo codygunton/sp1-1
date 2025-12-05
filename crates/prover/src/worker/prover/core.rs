@@ -298,6 +298,8 @@ where
                                 final_state,
                                 initialize_events,
                                 finalize_events,
+                                page_prot_initialize_events,
+                                page_prot_finalize_events,
                                 previous_init_addr,
                                 previous_finalize_addr,
                                 previous_init_page_idx,
@@ -314,6 +316,8 @@ where
                             );
                             record.global_memory_initialize_events = initialize_events;
                             record.global_memory_finalize_events = finalize_events;
+                            record.global_page_prot_initialize_events = page_prot_initialize_events;
+                            record.global_page_prot_finalize_events = page_prot_finalize_events;
 
                             let enable_untrusted_programs =
                                 common_input.vk.vk.enable_untrusted_programs == SP1Field::one();
@@ -436,7 +440,11 @@ where
             let program = program.clone();
             tokio::spawn(
                 async move {
-                    let split_opts = SplitOpts::new(&opts, program.instructions.len(), false);
+                    let split_opts = SplitOpts::new(
+                        &opts,
+                        program.instructions.len(),
+                        program.enable_untrusted_programs,
+                    );
                     let deferred_data =
                         DeferredEvents::defer_record(deferred_record, &artifact_client, split_opts)
                             .await?;

@@ -6,9 +6,10 @@ use crate::{
             field_inner_product::FieldInnerProductCols, field_op::FieldOpCols,
             field_sqrt::FieldSqrtCols, range::FieldLtCols,
         },
-        AddrAddOperation, SyscallAddrOperation,
+        AddrAddOperation, AddressSlicePageProtOperation, SyscallAddrOperation,
     },
     utils::{bytes_to_words_le_vec, limbs_to_words, next_multiple_of_32},
+    SupervisorMode, TrustMode, UserMode,
 };
 use core::{
     borrow::{Borrow, BorrowMut},
@@ -38,19 +39,26 @@ use sp1_hypercube::{
     air::{BaseAirBuilder, InteractionScope, MachineAir},
     Word,
 };
-use sp1_primitives::polynomial::Polynomial;
+use sp1_primitives::{
+    consts::{PROT_READ, PROT_WRITE},
+    polynomial::Polynomial,
+};
 use std::{fmt::Debug, marker::PhantomData, mem::MaybeUninit};
 use typenum::Unsigned;
 
-pub const fn num_weierstrass_decompress_cols<P: FieldParameters + NumWords>() -> usize {
-    size_of::<WeierstrassDecompressCols<u8, P>>()
+pub const fn num_weierstrass_decompress_cols_supervisor<P: FieldParameters + NumWords>() -> usize {
+    size_of::<WeierstrassDecompressCols<u8, P, SupervisorMode>>()
+}
+
+pub const fn num_weierstrass_decompress_cols_user<P: FieldParameters + NumWords>() -> usize {
+    size_of::<WeierstrassDecompressCols<u8, P, UserMode>>()
 }
 
 /// A set of columns to compute `WeierstrassDecompress` that decompresses a point on a Weierstrass
-/// curve. **TODO**: this precompile has no page protection, as it's expected to be deprecated.
+/// curve.
 #[derive(Debug, Clone, AlignedBorrow)]
 #[repr(C)]
-pub struct WeierstrassDecompressCols<T, P: FieldParameters + NumWords> {
+pub struct WeierstrassDecompressCols<T, P: FieldParameters + NumWords, M: TrustMode> {
     pub is_real: T,
     pub clk_high: T,
     pub clk_low: T,
@@ -61,6 +69,8 @@ pub struct WeierstrassDecompressCols<T, P: FieldParameters + NumWords> {
     pub x_access: GenericArray<MemoryAccessColsU8<T>, P::WordsFieldElement>,
     pub y_access: GenericArray<MemoryAccessCols<T>, P::WordsFieldElement>,
     pub y_value: GenericArray<Word<T>, P::WordsFieldElement>,
+    pub read_slice_page_prot_access: M::SliceProtCols<T>,
+    pub write_slice_page_prot_access: M::SliceProtCols<T>,
     pub(crate) range_x: FieldLtCols<T, P>,
     pub(crate) neg_y_range_check: FieldLtCols<T, P>,
     pub(crate) x_2: FieldOpCols<T, P>,
@@ -97,27 +107,27 @@ pub enum SignChoiceRule {
     Lexicographic,
 }
 
-pub struct WeierstrassDecompressChip<E> {
+pub struct WeierstrassDecompressChip<E, M: TrustMode> {
     sign_rule: SignChoiceRule,
-    _marker: PhantomData<E>,
+    _marker: PhantomData<(E, M)>,
 }
 
-impl<E: EllipticCurve + WeierstrassParameters> WeierstrassDecompressChip<E> {
+impl<E: EllipticCurve + WeierstrassParameters, M: TrustMode> WeierstrassDecompressChip<E, M> {
     pub const fn new(sign_rule: SignChoiceRule) -> Self {
-        Self { sign_rule, _marker: PhantomData::<E> }
+        Self { sign_rule, _marker: PhantomData }
     }
 
     pub const fn with_lsb_rule() -> Self {
-        Self { sign_rule: SignChoiceRule::LeastSignificantBit, _marker: PhantomData::<E> }
+        Self { sign_rule: SignChoiceRule::LeastSignificantBit, _marker: PhantomData }
     }
 
     pub const fn with_lexicographic_rule() -> Self {
-        Self { sign_rule: SignChoiceRule::Lexicographic, _marker: PhantomData::<E> }
+        Self { sign_rule: SignChoiceRule::Lexicographic, _marker: PhantomData }
     }
 
     fn populate_field_ops<F: PrimeField32>(
         record: &mut impl ByteRecord,
-        cols: &mut WeierstrassDecompressCols<F, E::BaseField>,
+        cols: &mut WeierstrassDecompressCols<F, E::BaseField, M>,
         x: BigUint,
     ) {
         // Y = sqrt(x^3 + ax + b)
@@ -146,22 +156,28 @@ impl<E: EllipticCurve + WeierstrassParameters> WeierstrassDecompressChip<E> {
     }
 }
 
-impl<F: PrimeField32, E: EllipticCurve + WeierstrassParameters> MachineAir<F>
-    for WeierstrassDecompressChip<E>
+impl<F: PrimeField32, E: EllipticCurve + WeierstrassParameters, M: TrustMode> MachineAir<F>
+    for WeierstrassDecompressChip<E, M>
 {
     type Record = ExecutionRecord;
     type Program = Program;
 
     fn name(&self) -> &'static str {
-        match E::CURVE_TYPE {
-            CurveType::Secp256k1 => "Secp256k1Decompress",
-            CurveType::Secp256r1 => "Secp256r1Decompress",
-            CurveType::Bls12381 => "Bls12381Decompress",
+        match (E::CURVE_TYPE, M::IS_TRUSTED) {
+            (CurveType::Secp256k1, true) => "Secp256k1Decompress",
+            (CurveType::Secp256k1, false) => "Secp256k1DecompressUser",
+            (CurveType::Secp256r1, true) => "Secp256r1Decompress",
+            (CurveType::Secp256r1, false) => "Secp256r1DecompressUser",
+            (CurveType::Bls12381, true) => "Bls12381Decompress",
+            (CurveType::Bls12381, false) => "Bls12381DecompressUser",
             _ => panic!("Unsupported curve"),
         }
     }
 
     fn num_rows(&self, input: &Self::Record) -> Option<usize> {
+        if input.program.enable_untrusted_programs == M::IS_TRUSTED {
+            return Some(0);
+        }
         let nb_rows = match E::CURVE_TYPE {
             CurveType::Secp256k1 => {
                 input.get_precompile_events(SyscallCode::SECP256K1_DECOMPRESS).len()
@@ -185,8 +201,12 @@ impl<F: PrimeField32, E: EllipticCurve + WeierstrassParameters> MachineAir<F>
         _output: &mut ExecutionRecord,
         buffer: &mut [MaybeUninit<F>],
     ) {
+        if input.program.enable_untrusted_programs == M::IS_TRUSTED {
+            return;
+        }
+
         let padded_nb_rows =
-            <WeierstrassDecompressChip<E> as MachineAir<F>>::num_rows(self, input).unwrap();
+            <WeierstrassDecompressChip<E, M> as MachineAir<F>>::num_rows(self, input).unwrap();
         let events = match E::CURVE_TYPE {
             CurveType::Secp256k1 => input.get_precompile_events(SyscallCode::SECP256K1_DECOMPRESS),
             CurveType::Secp256r1 => input.get_precompile_events(SyscallCode::SECP256R1_DECOMPRESS),
@@ -195,7 +215,12 @@ impl<F: PrimeField32, E: EllipticCurve + WeierstrassParameters> MachineAir<F>
         };
 
         let num_event_rows = events.len();
-        let num_cols = num_weierstrass_decompress_cols::<E::BaseField>();
+        let weierstrass_width = if M::IS_TRUSTED {
+            num_weierstrass_decompress_cols_supervisor::<E::BaseField>()
+        } else {
+            num_weierstrass_decompress_cols_user::<E::BaseField>()
+        };
+        let num_cols = weierstrass_width;
 
         let mut new_byte_lookup_events = Vec::new();
 
@@ -211,13 +236,12 @@ impl<F: PrimeField32, E: EllipticCurve + WeierstrassParameters> MachineAir<F>
         let values =
             unsafe { core::slice::from_raw_parts_mut(buffer_ptr, num_event_rows * num_cols) };
 
-        let weierstrass_width = num_weierstrass_decompress_cols::<E::BaseField>();
         let width = BaseAir::<F>::width(self);
         let num_limbs = <E::BaseField as NumLimbs>::Limbs::USIZE;
         let modulus = E::BaseField::modulus();
 
         values.chunks_mut(num_cols).enumerate().for_each(|(idx, row)| {
-            let cols: &mut WeierstrassDecompressCols<F, E::BaseField> = row.borrow_mut();
+            let cols: &mut WeierstrassDecompressCols<F, E::BaseField, M> = row.borrow_mut();
             let event = &events[idx].1;
             let event = match (E::CURVE_TYPE, event) {
                 (CurveType::Secp256k1, PrecompileEvent::Secp256k1Decompress(event)) => event,
@@ -252,7 +276,35 @@ impl<F: PrimeField32, E: EllipticCurve + WeierstrassParameters> MachineAir<F>
                 cols.y_addrs[i].populate(&mut new_byte_lookup_events, event.ptr, 8 * i as u64);
             }
 
+            if !M::IS_TRUSTED {
+                let cols: &mut WeierstrassDecompressCols<F, E::BaseField, UserMode> =
+                    unsafe { &mut *(cols as *mut _ as *mut _) };
+                cols.read_slice_page_prot_access.populate(
+                    &mut new_byte_lookup_events,
+                    event.ptr + num_limbs as u64,
+                    event.ptr + num_limbs as u64 + 8 * (cols.x_addrs.len() - 1) as u64,
+                    event.clk,
+                    PROT_READ,
+                    &event.page_prot_records.read_page_prot_records[0],
+                    &event.page_prot_records.read_page_prot_records.get(1).copied(),
+                    1,
+                );
+
+                cols.write_slice_page_prot_access.populate(
+                    &mut new_byte_lookup_events,
+                    event.ptr,
+                    event.ptr + 8 * (cols.y_addrs.len() - 1) as u64,
+                    event.clk + 1,
+                    PROT_WRITE,
+                    &event.page_prot_records.write_page_prot_records[0],
+                    &event.page_prot_records.write_page_prot_records.get(1).copied(),
+                    1,
+                );
+            }
+
             if matches!(self.sign_rule, SignChoiceRule::Lexicographic) {
+                let cols: &WeierstrassDecompressCols<F, E::BaseField, M> =
+                    unsafe { &*(row.as_ptr() as *const _) };
                 let lsb = cols.y.lsb;
                 let choice_cols: &mut LexicographicChoiceCols<F, E::BaseField> =
                     row[weierstrass_width..width].borrow_mut();
@@ -294,7 +346,7 @@ impl<F: PrimeField32, E: EllipticCurve + WeierstrassParameters> MachineAir<F>
                     num_cols,
                 )
             };
-            let cols: &mut WeierstrassDecompressCols<F, E::BaseField> = row.borrow_mut();
+            let cols: &mut WeierstrassDecompressCols<F, E::BaseField, M> = row.borrow_mut();
             // take X of the generator as a dummy value to make sure Y^2 = X^3 + b holds
             let dummy_value = E::generator().0;
             let dummy_bytes = dummy_value.to_bytes_le();
@@ -319,7 +371,7 @@ impl<F: PrimeField32, E: EllipticCurve + WeierstrassParameters> MachineAir<F>
         if let Some(shape) = shard.shape.as_ref() {
             shape.included::<F, _>(self)
         } else {
-            match E::CURVE_TYPE {
+            let has_events = match E::CURVE_TYPE {
                 CurveType::Secp256k1 => {
                     !shard.get_precompile_events(SyscallCode::SECP256K1_DECOMPRESS).is_empty()
                 }
@@ -330,14 +382,20 @@ impl<F: PrimeField32, E: EllipticCurve + WeierstrassParameters> MachineAir<F>
                     !shard.get_precompile_events(SyscallCode::BLS12381_DECOMPRESS).is_empty()
                 }
                 _ => panic!("Unsupported curve"),
-            }
+            };
+            has_events && (M::IS_TRUSTED != shard.program.enable_untrusted_programs)
         }
     }
 }
 
-impl<F, E: EllipticCurve> BaseAir<F> for WeierstrassDecompressChip<E> {
+impl<F, E: EllipticCurve, M: TrustMode> BaseAir<F> for WeierstrassDecompressChip<E, M> {
     fn width(&self) -> usize {
-        num_weierstrass_decompress_cols::<E::BaseField>()
+        let base_width = if M::IS_TRUSTED {
+            num_weierstrass_decompress_cols_supervisor::<E::BaseField>()
+        } else {
+            num_weierstrass_decompress_cols_user::<E::BaseField>()
+        };
+        base_width
             + match self.sign_rule {
                 SignChoiceRule::LeastSignificantBit => 0,
                 SignChoiceRule::Lexicographic => {
@@ -347,7 +405,8 @@ impl<F, E: EllipticCurve> BaseAir<F> for WeierstrassDecompressChip<E> {
     }
 }
 
-impl<AB, E: EllipticCurve + WeierstrassParameters> Air<AB> for WeierstrassDecompressChip<E>
+impl<AB, E: EllipticCurve + WeierstrassParameters, M: TrustMode> Air<AB>
+    for WeierstrassDecompressChip<E, M>
 where
     AB: SP1CoreAirBuilder,
     Limbs<AB::Var, <E::BaseField as NumLimbs>::Limbs>: Copy,
@@ -355,9 +414,13 @@ where
     fn eval(&self, builder: &mut AB) {
         let main = builder.main();
 
-        let weierstrass_cols = num_weierstrass_decompress_cols::<E::BaseField>();
+        let weierstrass_cols = if M::IS_TRUSTED {
+            num_weierstrass_decompress_cols_supervisor::<E::BaseField>()
+        } else {
+            num_weierstrass_decompress_cols_user::<E::BaseField>()
+        };
         let local_slice = main.row_slice(0);
-        let local: &WeierstrassDecompressCols<AB::Var, E::BaseField> =
+        let local: &WeierstrassDecompressCols<AB::Var, E::BaseField, M> =
             (*local_slice)[0..weierstrass_cols].borrow();
 
         let num_limbs = <E::BaseField as NumLimbs>::Limbs::USIZE;
@@ -561,6 +624,40 @@ where
                 local.y_access[i],
                 local.y_value[i],
                 local.is_real,
+            );
+        }
+
+        builder.assert_eq(
+            builder.extract_public_values().is_untrusted_programs_enabled,
+            AB::Expr::from_bool(!M::IS_TRUSTED),
+        );
+
+        // Page protection evaluation only for user mode
+        if !M::IS_TRUSTED {
+            let local_slice = main.row_slice(0);
+            let local: &WeierstrassDecompressCols<AB::Var, E::BaseField, UserMode> =
+                (*local_slice)[0..weierstrass_cols].borrow();
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into(),
+                &local.x_addrs[0].value.map(Into::into),
+                &local.x_addrs[local.x_addrs.len() - 1].value.map(Into::into),
+                AB::Expr::from_canonical_u8(PROT_READ),
+                &local.read_slice_page_prot_access,
+                local.is_real.into(),
+            );
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into() + AB::Expr::one(),
+                &local.ptr.addr.map(Into::into),
+                &local.y_addrs[local.y_addrs.len() - 1].value.map(Into::into),
+                AB::Expr::from_canonical_u8(PROT_WRITE),
+                &local.write_slice_page_prot_access,
+                local.is_real.into(),
             );
         }
 

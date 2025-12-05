@@ -1,5 +1,6 @@
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use vec_map::VecMap;
+
 /// A memory.
 ///
 /// Consists of registers, as well as a page table for main memory.
@@ -268,8 +269,8 @@ impl<V: Copy> PagedMemory<V> {
         let mut index = self.index[upper];
         if index == NO_PAGE {
             index = self.page_table.len() as u32;
-            self.index[upper] = index;
             self.page_table.push(NewPage::new());
+            self.index[upper] = index;
         }
         self.page_table[index as usize].0[lower].replace(value)
     }
@@ -291,8 +292,8 @@ impl<V: Copy> PagedMemory<V> {
         let index = self.index[upper];
         if index == NO_PAGE {
             let index = self.page_table.len();
-            self.index[upper] = index as u32;
             self.page_table.push(NewPage::new());
+            self.index[upper] = index as u32;
             Entry::Vacant(VacantEntry { entry: &mut self.page_table[index].0[lower] })
         } else {
             let option = &mut self.page_table[index as usize].0[lower];

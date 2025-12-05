@@ -15,6 +15,7 @@ pub fn estimate_trace_elements(
     costs_per_air: &EnumMap<RiscvAirId, u64>,
     program_size: u64,
     internal_syscalls_air_id: &[RiscvAirId],
+    enable_untrusted_programs: bool,
 ) -> (u64, u64) {
     let mut max_height = 0;
 
@@ -173,7 +174,7 @@ pub fn estimate_trace_elements(
         // Currently, all precompiles with `rows_per_event > 1` have the respective control chip.
         if rows_per_event > 1 {
             cells += num_events_per_air[syscall_air_id].next_multiple_of(32)
-                * costs_per_air[syscall_air_id.control_air_id().unwrap()];
+                * costs_per_air[syscall_air_id.control_air_id(enable_untrusted_programs).unwrap()];
         }
     }
 

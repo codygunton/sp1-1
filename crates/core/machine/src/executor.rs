@@ -89,23 +89,10 @@ impl<F: PrimeField32> MachineExecutor<F> {
         }
 
         // Execute the program to completion, collecting all trace chunks
-        let mut chunks = Vec::new();
-        while let Some(chunk) = minimal_executor.execute_chunk() {
-            chunks.push(chunk);
-        }
-
-        tracing::trace!("chunks: {:?}", chunks.len());
-
-        // Extract the public values stream from minimal executor
-        let public_value_stream = minimal_executor.into_public_values_stream();
-        let public_values = SP1PublicValues::from(&public_value_stream);
-
-        tracing::trace!("public_value_stream: {:?}", public_value_stream);
-
+        let mut chunks = 0;
         let mut accumulated_report = ExecutionReport::default();
-        let filler: [u8; 32] = [0; 32];
 
-        for chunk in chunks {
+        while let Some(chunk) = minimal_executor.execute_chunk() {
             let mut gas_estimating_vm = GasEstimatingVM::new(
                 &chunk,
                 program.clone(),
@@ -114,7 +101,19 @@ impl<F: PrimeField32> MachineExecutor<F> {
             );
             let report = gas_estimating_vm.execute().unwrap();
             accumulated_report += report;
+
+            chunks += 1;
         }
+
+        tracing::trace!("chunks: {:?}", chunks);
+
+        // Extract the public values stream from minimal executor
+        let public_value_stream = minimal_executor.into_public_values_stream();
+        let public_values = SP1PublicValues::from(&public_value_stream);
+
+        tracing::trace!("public_value_stream: {:?}", public_value_stream);
+
+        let filler: [u8; 32] = [0; 32];
 
         Ok((public_values, filler, accumulated_report))
     }
@@ -137,7 +136,11 @@ impl<F: PrimeField32> MachineExecutor<F> {
         let mut record_worker_channels = Vec::with_capacity(self.num_record_workers);
 
         // todo: use page protection
-        let split_opts = SplitOpts::new(&self.opts, program.instructions.len(), false);
+        let split_opts = SplitOpts::new(
+            &self.opts,
+            program.instructions.len(),
+            program.enable_untrusted_programs,
+        );
 
         tracing::debug!("starting {} record worker channels", self.num_record_workers);
         let mut handles = Vec::with_capacity(self.num_record_workers);
@@ -401,7 +404,7 @@ fn generate_chunks(
             }
             CycleResult::Done(false) | CycleResult::TraceEnd => {
                 // Note: Trace ends get mapped to shard boundaries.
-                unreachable!("The executor should never return an imcomplete program without a shard boundary");
+                unreachable!("The executor should never return an incomplete program without a shard boundary");
             }
         }
     }

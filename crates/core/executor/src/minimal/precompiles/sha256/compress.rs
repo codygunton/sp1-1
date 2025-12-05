@@ -31,11 +31,7 @@ pub(crate) unsafe fn sha256_compress(
     // let start_clk = ctx.clk;
 
     // Execute the "initialize" phase where we read in the h values.
-    let mut hx = [0u32; 8];
-    for i in 0..8 {
-        let value = ctx.mr(h_ptr + i as u64 * 8);
-        hx[i] = value as u32;
-    }
+    let hx: Vec<_> = ctx.mr_slice(h_ptr, 8).into_iter().map(|h| *h as u32).collect();
 
     ctx.bump_memory_clk();
 
@@ -49,16 +45,15 @@ pub(crate) unsafe fn sha256_compress(
     let mut f = hx[5];
     let mut g = hx[6];
     let mut h = hx[7];
+
+    let w_is: Vec<_> = ctx.mr_slice(w_ptr, 64).into_iter().map(|w| *w as u32).collect();
     for i in 0..64 {
         let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
         let ch = (e & f) ^ (!e & g);
-        let w_i = ctx.mr(w_ptr + i as u64 * 8) as u32;
+        let w_i = w_is[i];
         original_w.push(w_i);
-        let temp1 = h
-            .wrapping_add(s1)
-            .wrapping_add(ch)
-            .wrapping_add(SHA_COMPRESS_K[i as usize])
-            .wrapping_add(w_i);
+        let temp1 =
+            h.wrapping_add(s1).wrapping_add(ch).wrapping_add(SHA_COMPRESS_K[i]).wrapping_add(w_i);
         let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
         let maj = (a & b) ^ (a & c) ^ (b & c);
         let temp2 = s0.wrapping_add(maj);
@@ -78,10 +73,17 @@ pub(crate) unsafe fn sha256_compress(
     ctx.bump_memory_clk();
 
     // Execute the "finalize" phase.
-    let v = [a, b, c, d, e, f, g, h];
-    for i in 0..8 {
-        ctx.mw(h_ptr + i as u64 * 8, hx[i].wrapping_add(v[i]) as u64);
-    }
+    let v = [
+        a.wrapping_add(hx[0]) as u64,
+        b.wrapping_add(hx[1]) as u64,
+        c.wrapping_add(hx[2]) as u64,
+        d.wrapping_add(hx[3]) as u64,
+        e.wrapping_add(hx[4]) as u64,
+        f.wrapping_add(hx[5]) as u64,
+        g.wrapping_add(hx[6]) as u64,
+        h.wrapping_add(hx[7]) as u64,
+    ];
+    ctx.mw_slice(h_ptr, &v);
 
     None
 }

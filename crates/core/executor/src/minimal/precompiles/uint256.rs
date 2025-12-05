@@ -10,11 +10,11 @@ pub(crate) unsafe fn uint256_mul(
     arg2: u64,
 ) -> Option<u64> {
     let x_ptr = arg1;
-    if !x_ptr.is_multiple_of(4) {
+    if !x_ptr.is_multiple_of(8) {
         panic!();
     }
     let y_ptr = arg2;
-    if !y_ptr.is_multiple_of(4) {
+    if !y_ptr.is_multiple_of(8) {
         panic!();
     }
 
@@ -23,16 +23,14 @@ pub(crate) unsafe fn uint256_mul(
     let x = words_to_bytes_le_vec(ctx.mr_slice_unsafe(x_ptr, WORDS_FIELD_ELEMENT));
 
     // Read the y value.
-    let y = words_to_bytes_le_vec(ctx.mr_slice(y_ptr, WORDS_FIELD_ELEMENT));
+    let y_and_modulus = words_to_bytes_le_vec(ctx.mr_slice(y_ptr, WORDS_FIELD_ELEMENT * 2));
 
-    // The modulus is stored after the y value. We increment the pointer by the number of words.
-    let modulus_ptr = y_ptr + WORDS_FIELD_ELEMENT as u64 * WORD_BYTE_SIZE as u64;
-    let modulus = words_to_bytes_le_vec(ctx.mr_slice(modulus_ptr, WORDS_FIELD_ELEMENT));
+    let (y, modulus) = y_and_modulus.split_at(WORDS_FIELD_ELEMENT * WORD_BYTE_SIZE);
 
     // Get the BigUint values for x, y, and the modulus.
     let uint256_x = BigUint::from_bytes_le(&x);
-    let uint256_y = BigUint::from_bytes_le(&y);
-    let uint256_modulus = BigUint::from_bytes_le(&modulus);
+    let uint256_y = BigUint::from_bytes_le(y);
+    let uint256_modulus = BigUint::from_bytes_le(modulus);
 
     // Perform the multiplication and take the result modulo the modulus.
     let result: BigUint = if uint256_modulus.is_zero() {

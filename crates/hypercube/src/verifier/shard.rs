@@ -371,6 +371,7 @@ where
         // Verify that the rlc claim matches the random linear combination of evaluation claims from
         // gkr.
         if proof.zerocheck_proof.claimed_sum != zerocheck_sum_modification {
+            tracing::warn!("FAILED ZEROCHECK SHARD CHIPS: {:?}", shard_chips);
             return Err(ShardVerifierError::<
                 _,
                 <C as MultilinearPcsVerifier<GC>>::VerifierError,

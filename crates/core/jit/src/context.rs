@@ -7,8 +7,10 @@ pub trait SyscallContext {
     fn rr(&self, reg: RiscRegister) -> u64;
     /// Read a value from memory.
     fn mr(&mut self, addr: u64) -> u64;
+    fn mr_without_prot(&mut self, addr: u64) -> u64;
     /// Write a value to memory.
     fn mw(&mut self, addr: u64, val: u64);
+    fn mw_without_prot(&mut self, addr: u64, val: u64);
     /// Read a slice of values from memory.
     fn mr_slice(&mut self, addr: u64, len: usize) -> impl IntoIterator<Item = &u64>;
     /// Read a slice of values from memory, without updating the memory clock
@@ -18,6 +20,8 @@ pub trait SyscallContext {
     fn mr_slice_no_trace(&mut self, addr: u64, len: usize) -> impl IntoIterator<Item = &u64>;
     /// Write a slice of values to memory.
     fn mw_slice(&mut self, addr: u64, vals: &[u64]);
+    fn prot_slice_check(&mut self, addr: u64, len: usize, prot_bitmap: u8, update_clk: bool);
+    fn page_prot_write(&mut self, addr: u64, val: u8);
     /// Get the input buffer
     fn input_buffer(&mut self) -> &mut VecDeque<Vec<u8>>;
     /// Get the public values stream.
@@ -55,8 +59,16 @@ impl SyscallContext for JitContext {
         unsafe { ContextMemory::new(self).mr(addr) }
     }
 
+    fn mr_without_prot(&mut self, addr: u64) -> u64 {
+        self.mr(addr)
+    }
+
     fn mw(&mut self, addr: u64, val: u64) {
         unsafe { ContextMemory::new(self).mw(addr, val) };
+    }
+
+    fn mw_without_prot(&mut self, addr: u64, val: u64) {
+        self.mw(addr, val)
     }
 
     fn mr_slice(&mut self, addr: u64, len: usize) -> impl IntoIterator<Item = &u64> {
@@ -127,6 +139,14 @@ impl SyscallContext for JitContext {
 
     fn mw_slice(&mut self, addr: u64, vals: &[u64]) {
         unsafe { ContextMemory::new(self).mw_slice(addr, vals) };
+    }
+
+    fn page_prot_write(&mut self, _addr: u64, _val: u8) {
+        unimplemented!()
+    }
+
+    fn prot_slice_check(&mut self, _addr: u64, _len: usize, _prot_bitmap: u8, _update_clk: bool) {
+        unimplemented!()
     }
 
     fn input_buffer(&mut self) -> &mut VecDeque<Vec<u8>> {

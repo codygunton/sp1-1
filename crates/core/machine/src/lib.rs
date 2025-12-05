@@ -33,6 +33,67 @@ pub mod syscall;
 pub mod utils;
 pub mod utype;
 
+use air::SP1CoreAirBuilder;
+use operations::AddressSlicePageProtOperation;
+use program::instruction::InstructionCols;
+use slop_air::AirBuilder;
+use sp1_derive::AlignedBorrow;
+use std::fmt::Debug;
+
+pub trait TrustMode: Send + Sync + 'static {
+    const IS_TRUSTED: bool;
+    type AdapterCols<T>;
+    type SliceProtCols<T>;
+}
+
+#[derive(Default)]
+pub struct SupervisorMode;
+impl TrustMode for SupervisorMode {
+    const IS_TRUSTED: bool = true;
+    type AdapterCols<T> = ();
+    type SliceProtCols<T> = ();
+}
+
+#[derive(AlignedBorrow, Default, Debug, Clone, Copy)]
+#[repr(C)]
+pub struct UserModeReaderCols<T> {
+    pub is_trusted: T,
+}
+
+#[derive(Default)]
+pub struct UserMode;
+impl TrustMode for UserMode {
+    const IS_TRUSTED: bool = false;
+    type AdapterCols<T> = UserModeReaderCols<T>;
+    type SliceProtCols<T> = AddressSlicePageProtOperation<T>;
+}
+
+fn eval_untrusted_program<AB: SP1CoreAirBuilder>(
+    builder: &mut AB,
+    pc: [impl Into<AB::Expr>; 3],
+    instruction: InstructionCols<AB::Expr>,
+    instruction_field_consts: [AB::Expr; 4],
+    clk: [AB::Expr; 2],
+    is_real: AB::Expr,
+    adapter_cols: UserModeReaderCols<AB::Var>,
+) {
+    builder.send_instruction_fetch(
+        pc,
+        instruction,
+        instruction_field_consts,
+        clk,
+        is_real.clone() - adapter_cols.is_trusted.into(),
+    );
+
+    let is_untrusted = is_real.clone() - adapter_cols.is_trusted.into();
+    builder.assert_bool(adapter_cols.is_trusted);
+    builder.assert_bool(is_untrusted.clone());
+
+    // If the row is running an untrusted program, the page protection checks must be on.
+    let public_values = builder.extract_public_values();
+    builder.when(is_untrusted.clone()).assert_one(public_values.is_untrusted_programs_enabled);
+}
+
 // Re-export the `SP1RecursionProof` struct from sp1_core_machine.
 //
 // This is done to avoid a circular dependency between sp1_core_machine and sp1_core_executor, and

@@ -36,6 +36,12 @@ pub const DEFAULT_PAGE_PROT: u8 = PROT_READ | PROT_WRITE;
 
 /// The type for the ELF note for enabling untrusted programs.
 pub const NOTE_UNTRUSTED_PROGRAM_ENABLED: u32 = 1;
+/// The ELF note header for untrusted programs. It can serve as a version field
+/// in case we made changes in the future.
+pub const NOTE_DESC_HEADER: [u8; 4] = [b'1', 0, 0, 0];
+/// In current version the full desc holds a 4 byte header, and 2 64-bit integers
+/// denoting heap start/end. This also the memory region mprotect can work on.
+pub const NOTE_DESC_SIZE: usize = NOTE_DESC_HEADER.len() + 8 + 8;
 
 /// The stack top for the 64-bit zkvm.
 pub const STACK_TOP: u64 = 0x78000000;

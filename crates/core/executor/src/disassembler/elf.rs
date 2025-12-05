@@ -1,5 +1,6 @@
+use core::ffi::CStr;
 use elf::{
-    abi::{EM_RISCV, ET_EXEC, PF_W, PF_X, PT_LOAD, PT_NOTE},
+    abi::{EM_RISCV, ET_EXEC, PF_R, PF_W, PF_X, PT_LOAD, PT_NOTE},
     endian::LittleEndian,
     file::Class,
     segment::ProgramHeader,
@@ -8,8 +9,8 @@ use elf::{
 use eyre::OptionExt;
 use hashbrown::HashMap;
 use sp1_primitives::consts::{
-    INSTRUCTION_WORD_SIZE, MAXIMUM_MEMORY_SIZE, NOTE_UNTRUSTED_PROGRAM_ENABLED, PAGE_SIZE,
-    STACK_TOP,
+    INSTRUCTION_WORD_SIZE, MAXIMUM_MEMORY_SIZE, NOTE_DESC_HEADER, NOTE_DESC_SIZE,
+    NOTE_UNTRUSTED_PROGRAM_ENABLED, PAGE_SIZE, STACK_TOP,
 };
 
 /// RISC-V 64IM ELF (Executable and Linkable Format) File.
@@ -33,12 +34,13 @@ pub(crate) struct Elf {
     pub(crate) pc_base: u64,
     /// The initial page protection image, mapping page indices to protection flags.
     pub(crate) page_prot_image: HashMap<u64, u8>,
-    /// Flag indicating if untrusted programs are enabled.
-    pub(crate) enable_untrusted_programs: bool,
     /// The initial memory image, useful for global constants.
     pub(crate) memory_image: Arc<HashMap<u64, u64>>,
     /// Function symbols for profiling. In the form of (name, start address, size)
     pub(crate) function_symbols: Vec<(String, u64, u64)>,
+    /// The memory region where untrusted program could live in. It is also the
+    /// memory region mprotect works on.
+    pub(crate) untrusted_memory: Option<(u64, u64)>,
 }
 
 impl Elf {
@@ -50,8 +52,8 @@ impl Elf {
         pc_base: u64,
         memory_image: HashMap<u64, u64>,
         page_prot_image: HashMap<u64, u8>,
-        enable_untrusted_programs: bool,
         function_symbols: Vec<(String, u64, u64)>,
+        untrusted_memory: Option<(u64, u64)>,
     ) -> Self {
         Self {
             instructions,
@@ -59,8 +61,8 @@ impl Elf {
             pc_base,
             memory_image: Arc::new(memory_image),
             page_prot_image,
-            enable_untrusted_programs,
             function_symbols,
+            untrusted_memory,
         }
     }
 
@@ -109,8 +111,8 @@ impl Elf {
         // Data about the last segment.
         let mut prev_segment_end_addr = None;
 
-        // Toggle for enabling untrusted programs.
-        let mut enable_untrusted_programs = false;
+        // Untrusted memory region.
+        let mut untrusted_memory = None;
 
         // Check that the segments are sorted and disjoint.
         // Only read segments that are executable instructions that are also PT_LOAD.
@@ -127,8 +129,8 @@ impl Elf {
                 )?;
             }
 
-            if (segment.p_type == PT_NOTE) && !enable_untrusted_programs {
-                enable_untrusted_programs = Self::process_note_segment(&segment, input)?;
+            if (segment.p_type == PT_NOTE) && untrusted_memory.is_none() {
+                untrusted_memory = Self::process_note_segment(&segment, input)?;
             }
         }
 
@@ -165,8 +167,8 @@ impl Elf {
             base_address.unwrap(),
             image,
             page_prot_image,
-            enable_untrusted_programs,
             function_symbols,
+            untrusted_memory,
         ))
     }
 
@@ -206,6 +208,13 @@ impl Elf {
             eyre::bail!("ELF has a segment that is below the STACK_TOP");
         }
 
+        // Only allow segments of the following 3 combinations:
+        // * PF_R
+        // * PF_R | PF_X
+        // * PF_R | PF_W
+        if (segment.p_flags & PF_R) == 0 {
+            eyre::bail!("ELF has a segment that is not readable");
+        }
         if (segment.p_flags & PF_X) != 0 && (segment.p_flags & PF_W) != 0 {
             eyre::bail!("ELF has a segment that is both writable and executable");
         }
@@ -296,12 +305,17 @@ impl Elf {
         Ok(last_addr)
     }
 
-    fn process_note_segment(segment: &ProgramHeader, input: &[u8]) -> eyre::Result<bool> {
+    fn process_note_segment(
+        segment: &ProgramHeader,
+        input: &[u8],
+    ) -> eyre::Result<Option<(u64, u64)>> {
         let note_segment_offset: usize = segment.p_offset.try_into()?;
         let note_segment_size: usize = segment.p_filesz.try_into()?;
         let note_segment =
             input[note_segment_offset..note_segment_offset + note_segment_size].to_vec();
         let mut note_offset: usize = 0;
+
+        let padding = |size| (4 - size % 4) % 4;
 
         while note_offset < note_segment_size {
             let name_size: usize =
@@ -318,21 +332,35 @@ impl Elf {
                 u32::from_le_bytes(note_segment[note_offset..note_offset + 4].try_into()?);
             note_offset += 4;
 
-            let name =
-                String::from_utf8(note_segment[note_offset..note_offset + name_size].to_vec())?;
+            let name = {
+                let name_slice = &note_segment[note_offset..note_offset + name_size];
+                // An older version of SP1 puts "SUCCINCT" directly as the name without null terminator.
+                // We are preserving this convention not to break older files.
+                if name_slice.contains(&0) {
+                    CStr::from_bytes_until_nul(&note_segment[note_offset..note_offset + name_size])?
+                        .to_str()?
+                } else {
+                    std::str::from_utf8(name_slice)?
+                }
+            };
             // Need to increment offset by the padded size of the name.
-            note_offset += name_size + (name_size % 4);
+            note_offset += name_size + padding(name_size);
 
-            let desc =
-                String::from_utf8(note_segment[note_offset..note_offset + desc_size].to_vec())?;
-            // Need to increment offset by the padded size of the desc.
-            note_offset += desc_size + (desc_size % 4);
+            let desc_bytes = note_segment[note_offset..note_offset + desc_size].to_vec();
+            note_offset += desc_size + padding(desc_size);
 
-            if name == "SUCCINCT" && note_type == NOTE_UNTRUSTED_PROGRAM_ENABLED && desc == "1" {
-                return Ok(true);
+            if name == "SUCCINCT"
+                && note_type == NOTE_UNTRUSTED_PROGRAM_ENABLED
+                && desc_bytes.len() == NOTE_DESC_SIZE
+                && desc_bytes[0..4] == NOTE_DESC_HEADER
+            {
+                let heap_start = u64::from_le_bytes(desc_bytes[4..12].try_into().unwrap());
+                let heap_end = u64::from_le_bytes(desc_bytes[12..20].try_into().unwrap());
+                assert!(heap_end > heap_start);
+                return Ok(Some((heap_start, heap_end)));
             }
         }
 
-        Ok(false)
+        Ok(None)
     }
 }
