@@ -2,10 +2,11 @@
 #![allow(clippy::manual_checked_ops)]
 
 use crate::{
+    disassembler::InstructionTranspiler,
     events::{MemoryAccessPosition, MemoryReadRecord, MemoryRecord, MemoryWriteRecord},
     vm::{
         results::{
-            AluResult, BranchResult, CycleResult, EcallResult, JumpResult, LoadResult,
+            AluResult, BranchResult, CycleResult, EcallResult, FetchResult, JumpResult, LoadResult,
             MaybeImmediate, StoreResult, UTypeResult,
         },
         syscall::{sp1_ecall_handler, SyscallRuntime},
@@ -13,9 +14,13 @@ use crate::{
     ExecutionError, Instruction, Opcode, Program, Register, RetainedEventsPreset, SP1CoreOpts,
     SyscallCode, CLK_INC as CLK_INC_32, HALT_PC, PC_INC as PC_INC_32,
 };
+use hashbrown::HashMap;
+use rrs_lib::process_instruction;
+use std::{mem::MaybeUninit, num::Wrapping, ptr::addr_of_mut, sync::Arc};
+
 use sp1_hypercube::air::{PROOF_NONCE_NUM_WORDS, PV_DIGEST_NUM_WORDS};
 use sp1_jit::{MemReads, MinimalTrace};
-use std::{mem::MaybeUninit, num::Wrapping, ptr::addr_of_mut, sync::Arc};
+use sp1_primitives::consts::{LOG_PAGE_SIZE, PROT_EXEC, PROT_READ, PROT_WRITE};
 
 pub(crate) mod gas;
 pub(crate) mod memory;
@@ -26,7 +31,7 @@ pub(crate) mod syscall;
 const CLK_INC: u64 = CLK_INC_32 as u64;
 const PC_INC: u64 = PC_INC_32 as u64;
 
-/// A RISC-V VM that uses a [`MinimalTrace`] to oracle memory access.
+/// A RISC-V VM that uses a [`MinimalTrace`] to oracle memory & page permission access.
 pub struct CoreVM<'a> {
     registers: [MemoryRecord; 32],
     /// The current clock of the VM.
@@ -37,7 +42,7 @@ pub struct CoreVM<'a> {
     pc: u64,
     /// The current exit code of the VM.
     exit_code: u32,
-    /// The memory reads cursoir.
+    /// The memory reads cursor.
     pub mem_reads: MemReads<'a>,
     /// The next program counter that will be set in [`CoreVM::advance`].
     next_pc: u64,
@@ -57,6 +62,10 @@ pub struct CoreVM<'a> {
     pub public_value_digest: [u32; PV_DIGEST_NUM_WORDS],
     /// The nonce associated with the proof.
     pub proof_nonce: [u32; PROOF_NONCE_NUM_WORDS],
+    /// The transpiler of the program
+    transpiler: InstructionTranspiler,
+    /// Decoded instruction cache
+    decoded_instruction_cache: HashMap<u32, Instruction>,
 }
 
 impl<'a> CoreVM<'a> {
@@ -115,14 +124,48 @@ impl<'a> CoreVM<'a> {
             clk_end: trace.clk_end(),
             public_value_digest: [0; PV_DIGEST_NUM_WORDS],
             proof_nonce,
+            transpiler: InstructionTranspiler,
+            decoded_instruction_cache: HashMap::new(),
         }
     }
 
     /// Fetch the next instruction from the program.
     #[inline]
-    pub fn fetch(&mut self) -> Option<&Instruction> {
-        // todo: mprotect / kernel mode logic.
-        self.program.fetch(self.pc)
+    pub fn fetch(&mut self) -> Result<FetchResult, ExecutionError> {
+        if let Some(instruction) = self.program.fetch(self.pc) {
+            Ok(FetchResult { pc: self.pc, instruction: Some(*instruction), mr_record: None })
+        } else if self.program.enable_untrusted_programs {
+            let aligned_pc = self.pc & !0b111;
+            let mr_record = self.mr_instr(
+                aligned_pc,
+                PROT_READ | PROT_EXEC,
+                Some(MemoryAccessPosition::UntrustedInstruction),
+            );
+            let word = mr_record.value;
+            if !self.pc.is_multiple_of(4) {
+                return Err(ExecutionError::InvalidMemoryAccessUntrustedProgram(self.pc));
+            }
+            let aligned_offset = self.pc - aligned_pc;
+            let instruction_value: u32 =
+                (word >> (aligned_offset * 8) & 0xffffffff).try_into().unwrap();
+            let instruction = if let Some(cached_instruction) =
+                self.decoded_instruction_cache.get(&instruction_value)
+            {
+                *cached_instruction
+            } else {
+                let instruction =
+                    process_instruction(&mut self.transpiler, instruction_value).unwrap();
+                self.decoded_instruction_cache.insert(instruction_value, instruction);
+                instruction
+            };
+            Ok(FetchResult {
+                pc: self.pc,
+                instruction: Some(instruction),
+                mr_record: Some(mr_record),
+            })
+        } else {
+            Ok(FetchResult { pc: self.pc, instruction: None, mr_record: None })
+        }
     }
 
     #[inline]
@@ -159,12 +202,12 @@ impl<'a> CoreVM<'a> {
     ) -> Result<LoadResult, ExecutionError> {
         let (rd, rs1, imm) = instruction.i_type();
 
-        let rr_record = self.rr(rs1, MemoryAccessPosition::B);
+        let rr_record = self.rr(rs1, Some(MemoryAccessPosition::B));
         let b = rr_record.value;
 
         // Compute the address.
         let addr = b.wrapping_add(imm);
-        let mr_record = self.mr(addr);
+        let mr_record = self.mr_instr(addr, PROT_READ, Some(MemoryAccessPosition::Memory));
         let word = mr_record.value;
 
         let a = match instruction.opcode {
@@ -223,14 +266,14 @@ impl<'a> CoreVM<'a> {
         let (rs1, rs2, imm) = instruction.s_type();
 
         let c = imm;
-        let rs2_record = self.rr(rs2, MemoryAccessPosition::B);
-        let rs1_record = self.rr(rs1, MemoryAccessPosition::A);
+        let rs2_record = self.rr(rs2, Some(MemoryAccessPosition::B));
+        let rs1_record = self.rr(rs1, Some(MemoryAccessPosition::A));
 
         let b = rs2_record.value;
         let a = rs1_record.value;
         let addr = b.wrapping_add(c);
-        let mr_record = self.mr(addr);
-        let word = mr_record.value;
+        let mut mw_record = self.mw_instr(addr, Some(MemoryAccessPosition::Memory));
+        let word = mw_record.prev_value;
 
         let memory_store_value = match instruction.opcode {
             Opcode::SB => {
@@ -261,7 +304,7 @@ impl<'a> CoreVM<'a> {
             _ => unreachable!(),
         };
 
-        let mw_record = self.mw(mr_record, memory_store_value);
+        mw_record.value = memory_store_value;
 
         Ok(StoreResult { a, b, c, addr, rs1, rs1_record, rs2, rs2_record, mw_record })
     }
@@ -275,8 +318,8 @@ impl<'a> CoreVM<'a> {
 
         let (rd, b, c) = if !instruction.imm_c {
             let (rd, rs1, rs2) = instruction.r_type();
-            let c = self.rr(rs2, MemoryAccessPosition::C);
-            let b = self.rr(rs1, MemoryAccessPosition::B);
+            let c = self.rr(rs2, Some(MemoryAccessPosition::C));
+            let b = self.rr(rs1, Some(MemoryAccessPosition::B));
 
             // SAFETY: We're writing to a valid pointer as we just created the pointer from the
             // `result`.
@@ -286,7 +329,7 @@ impl<'a> CoreVM<'a> {
             (rd, b.value, c.value)
         } else if !instruction.imm_b && instruction.imm_c {
             let (rd, rs1, imm) = instruction.i_type();
-            let (rd, b, c) = (rd, self.rr(rs1, MemoryAccessPosition::B), imm);
+            let (rd, b, c) = (rd, self.rr(rs1, Some(MemoryAccessPosition::B)), imm);
 
             // SAFETY: We're writing to a valid pointer as we just created the pointer from the
             // `result`.
@@ -437,7 +480,7 @@ impl<'a> CoreVM<'a> {
             Opcode::JALR => {
                 let (rd, rs1, c) = instruction.i_type();
                 let imm_se = sign_extend_imm(c, 12);
-                let b_record = self.rr(rs1, MemoryAccessPosition::B);
+                let b_record = self.rr(rs1, Some(MemoryAccessPosition::B));
                 let a = self.pc.wrapping_add(4);
 
                 // Calculate next PC: (rs1 + imm) & ~1
@@ -464,8 +507,8 @@ impl<'a> CoreVM<'a> {
         let (rs1, rs2, imm) = instruction.b_type();
 
         let c = imm;
-        let b_record = self.rr(rs2, MemoryAccessPosition::B);
-        let a_record = self.rr(rs1, MemoryAccessPosition::A);
+        let b_record = self.rr(rs2, Some(MemoryAccessPosition::B));
+        let a_record = self.rr(rs1, Some(MemoryAccessPosition::A));
 
         let a = a_record.value;
         let b = b_record.value;
@@ -509,7 +552,7 @@ impl<'a> CoreVM<'a> {
     pub fn execute_ecall<RT>(
         rt: &mut RT,
         instruction: &Instruction,
-        code: SyscallCode,
+        _code: SyscallCode,
     ) -> Result<EcallResult, ExecutionError>
     where
         RT: SyscallRuntime<'a>,
@@ -520,8 +563,15 @@ impl<'a> CoreVM<'a> {
 
         let core = rt.core_mut();
 
-        let c_record = core.rr(Register::X11, MemoryAccessPosition::C);
-        let b_record = core.rr(Register::X10, MemoryAccessPosition::B);
+        // We peek at register x5 to get the syscall id. The reason we don't `self.rr` this
+        // register is that we write to it later.
+        let t0 = Register::X5;
+        // Peek at the register, we dont care about the read here.
+        let syscall_id = core.registers[t0 as usize].value;
+        let code = SyscallCode::from_u32(syscall_id as u32);
+
+        let c_record = core.rr(Register::X11, Some(MemoryAccessPosition::C));
+        let b_record = core.rr(Register::X10, Some(MemoryAccessPosition::B));
         let c = c_record.value;
         let b = b_record.value;
 
@@ -563,114 +613,61 @@ impl<'a> CoreVM<'a> {
 }
 
 impl CoreVM<'_> {
-    /// Read the next required memory read from the trace.
     #[inline]
-    fn mr(&mut self, addr: u64) -> MemoryReadRecord {
+    fn mr_instr(
+        &mut self,
+        addr: u64,
+        page_prot_bitmap: u8,
+        position: Option<MemoryAccessPosition>,
+    ) -> MemoryReadRecord {
+        let prev_page_prot_record = self.page_prot_check(addr >> LOG_PAGE_SIZE, page_prot_bitmap);
+
         #[allow(clippy::manual_let_else)]
         let record = match self.mem_reads.next() {
             Some(next) => next,
             None => {
-                unreachable!("memory reads unexpectdely exhausted at {addr}, clk {}", self.clk);
+                unreachable!("memory reads unexpectdely exhausted at {addr}, clk {}", self.clk());
             }
         };
 
         MemoryReadRecord {
             value: record.value,
-            timestamp: self.timestamp(MemoryAccessPosition::Memory),
+            timestamp: self.timestamp(position),
             prev_timestamp: record.clk,
-            prev_page_prot_record: None,
+            prev_page_prot_record,
         }
     }
 
     #[inline]
-    pub(crate) fn mr_slice_unsafe(&mut self, len: usize) -> Vec<u64> {
-        let mem_reads = self.mem_reads();
+    fn mw_instr(&mut self, addr: u64, position: Option<MemoryAccessPosition>) -> MemoryWriteRecord {
+        let prev_page_prot_record = self.page_prot_check(addr >> LOG_PAGE_SIZE, PROT_WRITE);
 
-        mem_reads.take(len).map(|value| value.value).collect()
-    }
+        let mem_writes = self.core_mut().mem_reads();
 
-    #[inline]
-    pub(crate) fn mr_slice(&mut self, _addr: u64, len: usize) -> Vec<MemoryReadRecord> {
-        let current_clk = self.clk();
-        let mem_reads = self.mem_reads();
+        let old = mem_writes.next().expect("Precompile memory read out of bounds");
 
-        let records: Vec<MemoryReadRecord> = mem_reads
-            .take(len)
-            .map(|value| MemoryReadRecord {
-                value: value.value,
-                timestamp: current_clk,
-                prev_timestamp: value.clk,
-                prev_page_prot_record: None,
-            })
-            .collect();
-
-        records
-    }
-
-    #[inline]
-    pub(crate) fn mw_slice(&mut self, _addr: u64, len: usize) -> Vec<MemoryWriteRecord> {
-        let mem_writes = self.mem_reads();
-
-        let raw_records: Vec<_> = mem_writes.take(len * 2).collect();
-        let records: Vec<MemoryWriteRecord> = raw_records
-            .chunks(2)
-            .map(|chunk| {
-                #[allow(clippy::manual_let_else)]
-                let (old, new) = match (chunk.first(), chunk.last()) {
-                    (Some(old), Some(new)) => (old, new),
-                    _ => unreachable!("Precompile memory write out of bounds"),
-                };
-
-                MemoryWriteRecord {
-                    prev_timestamp: old.clk,
-                    prev_value: old.value,
-                    timestamp: new.clk,
-                    value: new.value,
-                    prev_page_prot_record: None,
-                }
-            })
-            .collect();
-
-        records
-    }
-
-    #[inline]
-    fn mw(&mut self, read_record: MemoryReadRecord, value: u64) -> MemoryWriteRecord {
         MemoryWriteRecord {
-            prev_timestamp: read_record.prev_timestamp,
-            prev_value: read_record.value,
-            timestamp: self.timestamp(MemoryAccessPosition::Memory),
-            value,
-            prev_page_prot_record: None,
+            prev_timestamp: old.clk,
+            prev_value: old.value,
+            timestamp: self.timestamp(position),
+            // This will be updated in execute_store
+            value: 0,
+            prev_page_prot_record,
         }
     }
 
     /// Read a value from a register, updating the register entry and returning the record.
     #[inline]
-    fn rr(&mut self, register: Register, position: MemoryAccessPosition) -> MemoryReadRecord {
+    fn rr(
+        &mut self,
+        register: Register,
+        position: Option<MemoryAccessPosition>,
+    ) -> MemoryReadRecord {
         let prev_record = self.registers[register as usize];
         let new_record =
             MemoryRecord { timestamp: self.timestamp(position), value: prev_record.value };
 
         self.registers[register as usize] = new_record;
-
-        MemoryReadRecord {
-            value: new_record.value,
-            timestamp: new_record.timestamp,
-            prev_timestamp: prev_record.timestamp,
-            prev_page_prot_record: None,
-        }
-    }
-
-    /// Read a value from a register, updating the register entry and returning the record.
-    #[inline]
-    fn rr_precompile(&mut self, register: usize) -> MemoryReadRecord {
-        debug_assert!(register < 32, "out of bounds register: {register}");
-
-        let prev_record = self.registers[register];
-        let new_record = MemoryRecord { timestamp: self.clk(), value: prev_record.value };
-
-        self.registers[register] = new_record;
 
         MemoryReadRecord {
             value: new_record.value,
@@ -716,17 +713,10 @@ impl CoreVM<'_> {
         let value = if register == Register::X0 { 0 } else { value };
 
         let prev_record = self.registers[register as usize];
-        let new_record = MemoryRecord { timestamp: self.timestamp(MemoryAccessPosition::A), value };
+        let new_record =
+            MemoryRecord { timestamp: self.timestamp(Some(MemoryAccessPosition::A)), value };
 
         self.registers[register as usize] = new_record;
-
-        // if SHAPE_CHECKING {
-        //     self.shape_checker.handle_mem_event(register as u64, prev_record.timestamp);
-        // }
-
-        // if REPORT_GENERATING {
-        //     self.gas_calculator.handle_mem_event(register as u64, prev_record.timestamp);
-        // }
 
         MemoryWriteRecord {
             value: new_record.value,
@@ -742,8 +732,12 @@ impl CoreVM<'_> {
     /// Get the current timestamp for a given memory access position.
     #[inline]
     #[must_use]
-    pub const fn timestamp(&self, position: MemoryAccessPosition) -> u64 {
-        self.clk + position as u64
+    pub const fn timestamp(&self, position: Option<MemoryAccessPosition>) -> u64 {
+        if let Some(position) = position {
+            self.clk + position as u64
+        } else {
+            self.clk
+        }
     }
 
     /// Check if the top 24 bits have changed, which imply a `state bump` event needs to be emitted.

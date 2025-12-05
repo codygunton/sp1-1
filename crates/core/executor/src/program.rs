@@ -48,6 +48,9 @@ pub struct Program {
     pub enable_untrusted_programs: bool,
     /// Function symbols for profiling & debugging. In the form of (name, start address, size)
     pub function_symbols: Vec<(String, u64, u64)>,
+    /// The memory region where untrusted program could live in. It is also the
+    /// memory region mprotect works on.
+    pub untrusted_memory: Option<(u64, u64)>,
 }
 
 impl Program {
@@ -67,6 +70,7 @@ impl Program {
             preprocessed_shape: None,
             enable_untrusted_programs: false,
             function_symbols: Vec::new(),
+            untrusted_memory: None,
         }
     }
 
@@ -98,6 +102,7 @@ impl Program {
             eyre::bail!("elf has too many instructions");
         }
 
+        let enable_untrusted_programs = elf.untrusted_memory.is_some();
         // Return the program.
         Ok(Program {
             instructions,
@@ -107,8 +112,9 @@ impl Program {
             memory_image: elf.memory_image,
             page_prot_image: elf.page_prot_image,
             preprocessed_shape: None,
-            enable_untrusted_programs: elf.enable_untrusted_programs,
+            enable_untrusted_programs,
             function_symbols: elf.function_symbols,
+            untrusted_memory: elf.untrusted_memory,
         })
     }
 

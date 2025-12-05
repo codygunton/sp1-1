@@ -1,7 +1,11 @@
 use crate::{
     air::SP1Operation,
     memory::MemoryAccessColsU8,
-    operations::{field::field_op::FieldOpCols, AddrAddOperation, IsZeroOperationInput},
+    operations::{
+        field::field_op::FieldOpCols, AddrAddOperation, AddressSlicePageProtOperation,
+        IsZeroOperationInput,
+    },
+    SupervisorMode, TrustMode, UserMode,
 };
 
 use crate::{
@@ -28,22 +32,40 @@ use sp1_hypercube::{
     air::{InteractionScope, MachineAir},
     Word,
 };
-use sp1_primitives::polynomial::Polynomial;
+use sp1_primitives::{
+    consts::{PROT_READ, PROT_WRITE},
+    polynomial::Polynomial,
+};
 use std::{
     borrow::{Borrow, BorrowMut},
+    marker::PhantomData,
     mem::{size_of, MaybeUninit},
 };
 use typenum::Unsigned;
 
-/// The number of columns in the Uint256MulCols.
-const NUM_COLS: usize = size_of::<Uint256MulCols<u8>>();
+/// The number of columns in the Uint256MulCols (supervisor mode).
+pub const fn num_uint256_mul_cols_supervisor() -> usize {
+    size_of::<Uint256MulCols<u8, SupervisorMode>>()
+}
 
-#[derive(Default)]
-pub struct Uint256MulChip;
+/// The number of columns in the Uint256MulCols (user mode).
+pub const fn num_uint256_mul_cols_user() -> usize {
+    size_of::<Uint256MulCols<u8, UserMode>>()
+}
 
-impl Uint256MulChip {
+pub struct Uint256MulChip<M: TrustMode> {
+    _marker: PhantomData<M>,
+}
+
+impl<M: TrustMode> Default for Uint256MulChip<M> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<M: TrustMode> Uint256MulChip<M> {
     pub const fn new() -> Self {
-        Self
+        Self { _marker: PhantomData }
     }
 }
 
@@ -53,7 +75,7 @@ const WORDS_FIELD_ELEMENT: usize = WordsFieldElement::USIZE;
 /// A set of columns for the Uint256Mul operation.
 #[derive(Debug, Clone, AlignedBorrow)]
 #[repr(C)]
-pub struct Uint256MulCols<T> {
+pub struct Uint256MulCols<T, M: TrustMode> {
     /// The high bits of the clk of the syscall.
     pub clk_high: T,
 
@@ -88,17 +110,27 @@ pub struct Uint256MulCols<T> {
     pub output_range_check: FieldLtCols<T, U256Field>,
 
     pub is_real: T,
+
+    pub address_slice_page_prot_access_x: M::SliceProtCols<T>,
+    pub address_slice_page_prot_access_y: M::SliceProtCols<T>,
 }
 
-impl<F: PrimeField32> MachineAir<F> for Uint256MulChip {
+impl<F: PrimeField32, M: TrustMode> MachineAir<F> for Uint256MulChip<M> {
     type Record = ExecutionRecord;
     type Program = Program;
 
     fn name(&self) -> &'static str {
-        "Uint256MulMod"
+        if M::IS_TRUSTED {
+            "Uint256MulMod"
+        } else {
+            "Uint256MulModUser"
+        }
     }
 
     fn num_rows(&self, input: &Self::Record) -> Option<usize> {
+        if input.program.enable_untrusted_programs == M::IS_TRUSTED {
+            return Some(0);
+        }
         let nb_rows = input.get_precompile_events(SyscallCode::UINT256_MUL).len();
         let size_log2 = input.fixed_log2_rows::<F, _>(self);
         let padded_nb_rows = next_multiple_of_32(nb_rows, size_log2);
@@ -111,14 +143,19 @@ impl<F: PrimeField32> MachineAir<F> for Uint256MulChip {
         output: &mut ExecutionRecord,
         buffer: &mut [MaybeUninit<F>],
     ) {
-        let padded_nb_rows = <Uint256MulChip as MachineAir<F>>::num_rows(self, input).unwrap();
+        if input.program.enable_untrusted_programs == M::IS_TRUSTED {
+            return;
+        }
+
+        let width = <Uint256MulChip<M> as BaseAir<F>>::width(self);
+        let padded_nb_rows = <Uint256MulChip<M> as MachineAir<F>>::num_rows(self, input).unwrap();
         let events = input.get_precompile_events(SyscallCode::UINT256_MUL);
         let chunk_size = 1;
         let num_event_rows = events.len();
 
         unsafe {
-            let padding_start = num_event_rows * NUM_COLS;
-            let padding_size = (padded_nb_rows - num_event_rows) * NUM_COLS;
+            let padding_start = num_event_rows * width;
+            let padding_size = (padded_nb_rows - num_event_rows) * width;
             if padding_size > 0 {
                 core::ptr::write_bytes(buffer[padding_start..].as_mut_ptr(), 0, padding_size);
             }
@@ -126,114 +163,136 @@ impl<F: PrimeField32> MachineAir<F> for Uint256MulChip {
 
         let buffer_ptr = buffer.as_mut_ptr() as *mut F;
         let buffer_as_slice =
-            unsafe { core::slice::from_raw_parts_mut(buffer_ptr, num_event_rows * NUM_COLS) };
+            unsafe { core::slice::from_raw_parts_mut(buffer_ptr, num_event_rows * width) };
 
         let mut new_byte_lookup_events = Vec::new();
 
-        buffer_as_slice.chunks_exact_mut(chunk_size * NUM_COLS).enumerate().for_each(
-            |(i, rows)| {
-                rows.chunks_mut(NUM_COLS).enumerate().for_each(|(j, row)| {
-                    let idx = i * chunk_size + j;
-                    if idx < events.len() {
-                        let event = &events[idx].1;
-                        let event = if let PrecompileEvent::Uint256Mul(event) = event {
-                            event
-                        } else {
-                            unreachable!()
-                        };
+        buffer_as_slice.chunks_exact_mut(chunk_size * width).enumerate().for_each(|(i, rows)| {
+            rows.chunks_mut(width).enumerate().for_each(|(j, row)| {
+                let idx = i * chunk_size + j;
+                if idx < events.len() {
+                    let event = &events[idx].1;
+                    let event = if let PrecompileEvent::Uint256Mul(event) = event {
+                        event
+                    } else {
+                        unreachable!()
+                    };
 
-                        unsafe {
-                            core::ptr::write_bytes(row.as_mut_ptr(), 0, NUM_COLS);
-                        }
+                    unsafe {
+                        core::ptr::write_bytes(row.as_mut_ptr(), 0, width);
+                    }
 
-                        let cols: &mut Uint256MulCols<F> = row.borrow_mut();
+                    let cols: &mut Uint256MulCols<F, M> = row.borrow_mut();
 
-                        // Decode uint256 points
-                        let x = BigUint::from_bytes_le(&words_to_bytes_le::<32>(&event.x));
-                        let y = BigUint::from_bytes_le(&words_to_bytes_le::<32>(&event.y));
-                        let modulus =
-                            BigUint::from_bytes_le(&words_to_bytes_le::<32>(&event.modulus));
+                    // Decode uint256 points
+                    let x = BigUint::from_bytes_le(&words_to_bytes_le::<32>(&event.x));
+                    let y = BigUint::from_bytes_le(&words_to_bytes_le::<32>(&event.y));
+                    let modulus = BigUint::from_bytes_le(&words_to_bytes_le::<32>(&event.modulus));
 
-                        // Assign basic values to the columns.
-                        cols.is_real = F::one();
+                    // Assign basic values to the columns.
+                    cols.is_real = F::one();
 
-                        cols.clk_high = F::from_canonical_u32((event.clk >> 24) as u32);
-                        cols.clk_low = F::from_canonical_u32((event.clk & 0xFFFFFF) as u32);
+                    cols.clk_high = F::from_canonical_u32((event.clk >> 24) as u32);
+                    cols.clk_low = F::from_canonical_u32((event.clk & 0xFFFFFF) as u32);
 
-                        cols.x_ptr.populate(&mut new_byte_lookup_events, event.x_ptr, 32);
-                        cols.y_ptr.populate(&mut new_byte_lookup_events, event.y_ptr, 64);
+                    cols.x_ptr.populate(&mut new_byte_lookup_events, event.x_ptr, 32);
+                    cols.y_ptr.populate(&mut new_byte_lookup_events, event.y_ptr, 64);
 
-                        let modulus_ptr = event.y_ptr + WORDS_FIELD_ELEMENT as u64 * 8;
+                    let modulus_ptr = event.y_ptr + WORDS_FIELD_ELEMENT as u64 * 8;
 
-                        // Populate memory columns.
-                        for i in 0..WORDS_FIELD_ELEMENT {
-                            let x_memory_record =
-                                MemoryRecordEnum::Write(event.x_memory_records[i]);
-                            let y_memory_record = MemoryRecordEnum::Read(event.y_memory_records[i]);
-                            let modulus_memory_record =
-                                MemoryRecordEnum::Read(event.modulus_memory_records[i]);
-                            cols.x_memory[i].populate(x_memory_record, &mut new_byte_lookup_events);
-                            cols.y_memory[i].populate(y_memory_record, &mut new_byte_lookup_events);
-                            cols.modulus_memory[i]
-                                .populate(modulus_memory_record, &mut new_byte_lookup_events);
+                    // Populate memory columns.
+                    for i in 0..WORDS_FIELD_ELEMENT {
+                        let x_memory_record = MemoryRecordEnum::Write(event.x_memory_records[i]);
+                        let y_memory_record = MemoryRecordEnum::Read(event.y_memory_records[i]);
+                        let modulus_memory_record =
+                            MemoryRecordEnum::Read(event.modulus_memory_records[i]);
+                        cols.x_memory[i].populate(x_memory_record, &mut new_byte_lookup_events);
+                        cols.y_memory[i].populate(y_memory_record, &mut new_byte_lookup_events);
+                        cols.modulus_memory[i]
+                            .populate(modulus_memory_record, &mut new_byte_lookup_events);
 
-                            cols.x_addrs[i].populate(
-                                &mut new_byte_lookup_events,
-                                event.x_ptr,
-                                8 * i as u64,
-                            );
-
-                            cols.y_and_modulus_addrs[i].populate(
-                                &mut new_byte_lookup_events,
-                                event.y_ptr,
-                                8 * i as u64,
-                            );
-
-                            cols.y_and_modulus_addrs[i + WORDS_FIELD_ELEMENT].populate(
-                                &mut new_byte_lookup_events,
-                                modulus_ptr,
-                                8 * i as u64,
-                            );
-                        }
-
-                        let modulus_bytes = words_to_bytes_le_vec(&event.modulus);
-                        let modulus_byte_sum = modulus_bytes.iter().map(|b| *b as u64).sum::<u64>();
-                        IsZeroOperation::populate(&mut cols.modulus_is_zero, modulus_byte_sum);
-
-                        // Populate the output column.
-                        let effective_modulus =
-                            if modulus.is_zero() { BigUint::one() << 256 } else { modulus.clone() };
-                        let result = cols.output.populate_with_modulus(
+                        cols.x_addrs[i].populate(
                             &mut new_byte_lookup_events,
-                            &x,
-                            &y,
-                            &effective_modulus,
-                            FieldOperation::Mul,
+                            event.x_ptr,
+                            8 * i as u64,
                         );
 
-                        cols.modulus_is_not_zero = F::one() - cols.modulus_is_zero.result;
-                        if cols.modulus_is_not_zero == F::one() {
-                            cols.output_range_check.populate(
-                                &mut new_byte_lookup_events,
-                                &result,
-                                &effective_modulus,
-                            );
-                        }
+                        cols.y_and_modulus_addrs[i].populate(
+                            &mut new_byte_lookup_events,
+                            event.y_ptr,
+                            8 * i as u64,
+                        );
+
+                        cols.y_and_modulus_addrs[i + WORDS_FIELD_ELEMENT].populate(
+                            &mut new_byte_lookup_events,
+                            modulus_ptr,
+                            8 * i as u64,
+                        );
                     }
-                })
-            },
-        );
+
+                    let modulus_bytes = words_to_bytes_le_vec(&event.modulus);
+                    let modulus_byte_sum = modulus_bytes.iter().map(|b| *b as u64).sum::<u64>();
+                    IsZeroOperation::populate(&mut cols.modulus_is_zero, modulus_byte_sum);
+
+                    // Populate the output column.
+                    let effective_modulus =
+                        if modulus.is_zero() { BigUint::one() << 256 } else { modulus.clone() };
+                    let result = cols.output.populate_with_modulus(
+                        &mut new_byte_lookup_events,
+                        &x,
+                        &y,
+                        &effective_modulus,
+                        FieldOperation::Mul,
+                    );
+
+                    cols.modulus_is_not_zero = F::one() - cols.modulus_is_zero.result;
+                    if cols.modulus_is_not_zero == F::one() {
+                        cols.output_range_check.populate(
+                            &mut new_byte_lookup_events,
+                            &result,
+                            &effective_modulus,
+                        );
+                    }
+                    if !M::IS_TRUSTED {
+                        let cols: &mut Uint256MulCols<F, UserMode> = row.borrow_mut();
+                        // Populate page protection operations (once per event, not per word)
+                        cols.address_slice_page_prot_access_y.populate(
+                            &mut new_byte_lookup_events,
+                            event.y_ptr,
+                            event.y_ptr + ((WORDS_FIELD_ELEMENT * 2 - 1) * 8) as u64,
+                            event.clk,
+                            PROT_READ,
+                            &event.page_prot_records.read_y_modulus_page_prot_records[0],
+                            &event
+                                .page_prot_records
+                                .read_y_modulus_page_prot_records
+                                .get(1)
+                                .copied(),
+                            input.public_values.is_untrusted_programs_enabled,
+                        );
+
+                        cols.address_slice_page_prot_access_x.populate(
+                            &mut new_byte_lookup_events,
+                            event.x_ptr,
+                            event.x_ptr + ((WORDS_FIELD_ELEMENT - 1) * 8) as u64,
+                            event.clk + 1,
+                            PROT_READ | PROT_WRITE,
+                            &event.page_prot_records.write_x_page_prot_records[0],
+                            &event.page_prot_records.write_x_page_prot_records.get(1).copied(),
+                            input.public_values.is_untrusted_programs_enabled,
+                        );
+                    }
+                }
+            })
+        });
 
         for row in num_event_rows..padded_nb_rows {
-            let row_start = row * NUM_COLS;
+            let row_start = row * width;
             let row = unsafe {
-                core::slice::from_raw_parts_mut(
-                    buffer[row_start..].as_mut_ptr() as *mut F,
-                    NUM_COLS,
-                )
+                core::slice::from_raw_parts_mut(buffer[row_start..].as_mut_ptr() as *mut F, width)
             };
 
-            let cols: &mut Uint256MulCols<F> = row.borrow_mut();
+            let cols: &mut Uint256MulCols<F, M> = row.borrow_mut();
 
             let x = BigUint::zero();
             let y = BigUint::zero();
@@ -244,6 +303,10 @@ impl<F: PrimeField32> MachineAir<F> for Uint256MulChip {
     }
 
     fn included(&self, shard: &Self::Record) -> bool {
+        if M::IS_TRUSTED == shard.program.enable_untrusted_programs {
+            return false;
+        }
+
         if let Some(shape) = shard.shape.as_ref() {
             shape.included::<F, _>(self)
         } else {
@@ -252,13 +315,17 @@ impl<F: PrimeField32> MachineAir<F> for Uint256MulChip {
     }
 }
 
-impl<F> BaseAir<F> for Uint256MulChip {
+impl<F, M: TrustMode> BaseAir<F> for Uint256MulChip<M> {
     fn width(&self) -> usize {
-        NUM_COLS
+        if M::IS_TRUSTED {
+            num_uint256_mul_cols_supervisor()
+        } else {
+            num_uint256_mul_cols_user()
+        }
     }
 }
 
-impl<AB> Air<AB> for Uint256MulChip
+impl<AB, M: TrustMode> Air<AB> for Uint256MulChip<M>
 where
     AB: SP1CoreAirBuilder,
     Limbs<AB::Var, <U256Field as NumLimbs>::Limbs>: Copy,
@@ -266,7 +333,7 @@ where
     fn eval(&self, builder: &mut AB) {
         let main = builder.main();
         let local = main.row_slice(0);
-        let local: &Uint256MulCols<AB::Var> = (*local).borrow();
+        let local: &Uint256MulCols<AB::Var, M> = (*local).borrow();
 
         // We are computing (x * y) % modulus. The value of x is stored in the "prev_value" of
         // the x_memory, since we write to it later.
@@ -393,5 +460,40 @@ where
             local.is_real,
             InteractionScope::Local,
         );
+
+        builder.assert_eq(
+            builder.extract_public_values().is_untrusted_programs_enabled,
+            AB::Expr::from_bool(!M::IS_TRUSTED),
+        );
+
+        // Evaluate the page prot accesses only for user mode.
+        if !M::IS_TRUSTED {
+            let local = main.row_slice(0);
+            let local: &Uint256MulCols<AB::Var, UserMode> = (*local).borrow();
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into(),
+                &y_ptr.map(Into::into),
+                &local.y_and_modulus_addrs[local.y_and_modulus_addrs.len() - 1]
+                    .value
+                    .map(Into::into),
+                AB::Expr::from_canonical_u8(PROT_READ),
+                &local.address_slice_page_prot_access_y,
+                local.is_real.into(),
+            );
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into() + AB::Expr::one(),
+                &x_ptr.map(Into::into),
+                &local.x_addrs[local.x_addrs.len() - 1].value.map(Into::into),
+                AB::Expr::from_canonical_u8(PROT_READ | PROT_WRITE),
+                &local.address_slice_page_prot_access_x,
+                local.is_real.into(),
+            );
+        }
     }
 }

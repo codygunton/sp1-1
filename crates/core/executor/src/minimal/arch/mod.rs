@@ -1,6 +1,6 @@
 cfg_if::cfg_if! {
     // On x86_64 Linux without profiling: use native backend only
-    if #[cfg(all(target_arch = "x86_64", target_endian = "little", target_os = "linux", not(feature = "profiling")))] {
+    if #[cfg(all(target_arch = "x86_64", target_endian = "little", not(feature = "profiling"), not(feature = "force-portable-executor")))] {
         mod x86_64;
         pub use x86_64::*;
     }

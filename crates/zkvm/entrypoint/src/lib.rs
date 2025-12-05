@@ -132,6 +132,9 @@ mod zkvm {
 
     use cfg_if::cfg_if;
     use sha2::{Digest, Sha256};
+    use sp1_primitives::consts::{
+        NOTE_DESC_HEADER, NOTE_DESC_SIZE, NOTE_UNTRUSTED_PROGRAM_ENABLED,
+    };
 
     cfg_if! {
         if #[cfg(feature = "verify")] {
@@ -151,46 +154,59 @@ mod zkvm {
         }
     }
 
+    extern "C" {
+        // https://lld.llvm.org/ELF/linker_script.html#sections-command
+        static _end: u8;
+    }
+
+    cfg_if! {
+        if #[cfg(feature = "bump")] {
+            const HEAP_END: u64 = sp1_primitives::consts::MAXIMUM_MEMORY_SIZE;
+        } else {
+            const HEAP_END: u64 = crate::EMBEDDED_RESERVED_INPUT_START as u64;
+        }
+    }
+
     /// The ELF note values.
-    const NAME: [u8; 8] = *b"SUCCINCT";
-    const NAMESZ_LE: [u8; 4] = (NAME.len() as u32).to_le_bytes();
-    const DESC: [u8; 4] = [b'1', 0, 0, 0];
-    const DESCSZ_LE: [u8; 4] = (1u32).to_le_bytes();
-    const TYPE_LE: [u8; 4] =
-        (sp1_primitives::consts::NOTE_UNTRUSTED_PROGRAM_ENABLED as u32).to_le_bytes();
+    const NAME: [u8; 9] = *b"SUCCINCT\0";
+    const NAME_SIZE: usize = NAME.len();
+    const NAME_PADDING_SIZE: usize = (4 - NAME_SIZE % 4) % 4;
+    const DESC_PADDING_SIZE: usize = (4 - NOTE_DESC_SIZE % 4) % 4;
+
+    // Note will be written in host platform outside of SP1 VM, skipping
+    // alignment is actually fine.
+    #[repr(packed)]
+    struct NoteSection {
+        namesz: [u8; 4],
+        descsz: [u8; 4],
+        type_: [u8; 4],
+        name: [u8; NAME_SIZE],
+        name_padding: [u8; NAME_PADDING_SIZE],
+        desc_header: [u8; NOTE_DESC_HEADER.len()],
+        heap_start: *const u8,
+        heap_end: [u8; 8],
+        desc_padding: [u8; DESC_PADDING_SIZE],
+    }
+    // SAFETY: SP1 is single threaded so this is safe, in addition,
+    // we don't really access the note section from Rust. This is really
+    // to suppress errors complained by rust that `*const u8` is not Sync.
+    unsafe impl Sync for NoteSection {}
 
     #[cfg(feature = "untrusted_programs")]
     #[link_section = ".note.succinct"]
     #[used]
-    pub static ELF_NOTE: [u8; 24] = [
-        // header
-        NAMESZ_LE[0],
-        NAMESZ_LE[1],
-        NAMESZ_LE[2],
-        NAMESZ_LE[3],
-        DESCSZ_LE[0],
-        DESCSZ_LE[1],
-        DESCSZ_LE[2],
-        DESCSZ_LE[3],
-        TYPE_LE[0],
-        TYPE_LE[1],
-        TYPE_LE[2],
-        TYPE_LE[3],
-        // name (8)
-        NAME[0],
-        NAME[1],
-        NAME[2],
-        NAME[3],
-        NAME[4],
-        NAME[5],
-        NAME[6],
-        NAME[7],
-        // desc (4)
-        DESC[0],
-        DESC[1],
-        DESC[2],
-        DESC[3],
-    ];
+    pub static ELF_NOTE: NoteSection = NoteSection {
+        namesz: (NAME_SIZE as u32).to_le_bytes(),
+        descsz: (NOTE_DESC_SIZE as u32).to_le_bytes(),
+        type_: (NOTE_UNTRUSTED_PROGRAM_ENABLED as u32).to_le_bytes(),
+        name: NAME,
+        name_padding: [0u8; NAME_PADDING_SIZE],
+        desc_header: NOTE_DESC_HEADER,
+        // The linker should use target encoding, so we should be fine here.
+        heap_start: std::ptr::addr_of!(_end) as *const u8,
+        heap_end: HEAP_END.to_le_bytes(),
+        desc_padding: [0u8; DESC_PADDING_SIZE],
+    };
 
     #[no_mangle]
     unsafe extern "C" fn __start() {

@@ -1,8 +1,7 @@
 use sp1_curves::edwards::WORDS_FIELD_ELEMENT;
-use sp1_primitives::consts::WORD_BYTE_SIZE;
 
 use crate::{
-    events::{PrecompileEvent, Uint256MulEvent},
+    events::{PrecompileEvent, Uint256MulEvent, Uint256MulPageProtRecords},
     vm::syscall::SyscallRuntime,
     SyscallCode,
 };
@@ -14,11 +13,11 @@ pub(crate) fn uint256_mul<'a, RT: SyscallRuntime<'a>>(
     arg2: u64,
 ) -> Option<u64> {
     let x_ptr = arg1;
-    if !x_ptr.is_multiple_of(4) {
+    if !x_ptr.is_multiple_of(8) {
         panic!();
     }
     let y_ptr = arg2;
-    if !y_ptr.is_multiple_of(4) {
+    if !y_ptr.is_multiple_of(8) {
         panic!();
     }
 
@@ -28,21 +27,24 @@ pub(crate) fn uint256_mul<'a, RT: SyscallRuntime<'a>>(
     // the computed result to x later.
     let x = rt.mr_slice_unsafe(WORDS_FIELD_ELEMENT);
 
-    // Read the y value.
-    let y_memory_records = rt.mr_slice(y_ptr, WORDS_FIELD_ELEMENT);
-    let y = y_memory_records.iter().map(|record| record.value).collect();
+    // Read the y and modulus values.
+    let (combined_memory_records, read_y_modulus_page_prot_records) =
+        rt.mr_slice(y_ptr, WORDS_FIELD_ELEMENT * 2);
 
-    // The modulus is stored after the y value. We increment the pointer by the number of words.
-    let modulus_ptr = y_ptr + WORDS_FIELD_ELEMENT as u64 * WORD_BYTE_SIZE as u64;
-    let modulus_memory_records = rt.mr_slice(modulus_ptr, WORDS_FIELD_ELEMENT);
+    let (y_memory_records, modulus_memory_records) =
+        combined_memory_records.split_at(WORDS_FIELD_ELEMENT);
+
+    let y = y_memory_records.iter().map(|record| record.value).collect();
     let modulus = modulus_memory_records.iter().map(|record| record.value).collect();
 
     rt.increment_clk();
 
     // Write the result to x and keep track of the memory records.
-    let x_memory_records = rt.mw_slice(x_ptr, 4);
+    let (x_memory_records, x_page_prot_records) = rt.mw_slice(x_ptr, 4);
 
     if RT::TRACING {
+        let (local_mem_access, local_page_prot_access) = rt.postprocess_precompile();
+
         let event = PrecompileEvent::Uint256Mul(Uint256MulEvent {
             clk,
             x_ptr,
@@ -51,10 +53,14 @@ pub(crate) fn uint256_mul<'a, RT: SyscallRuntime<'a>>(
             y,
             modulus,
             x_memory_records,
-            y_memory_records,
-            modulus_memory_records,
-            local_mem_access: rt.postprocess_precompile(),
-            ..Default::default()
+            y_memory_records: y_memory_records.to_vec(),
+            modulus_memory_records: modulus_memory_records.to_vec(),
+            local_mem_access,
+            page_prot_records: Uint256MulPageProtRecords {
+                write_x_page_prot_records: x_page_prot_records,
+                read_y_modulus_page_prot_records,
+            },
+            local_page_prot_access,
         });
         let syscall_event = rt.syscall_event(
             clk,

@@ -1,9 +1,11 @@
 use hashbrown::HashSet;
 
 use crate::{
-    events::{MemoryInitializeFinalizeEvent, MemoryRecord},
+    events::{MemoryInitializeFinalizeEvent, MemoryRecord, PageProtInitializeFinalizeEvent},
     ExecutionRecord, MinimalExecutor,
 };
+
+use sp1_primitives::consts::DEFAULT_PAGE_PROT;
 
 impl MinimalExecutor {
     /// Postprocess into an existing [`ExecutionRecord`],
@@ -66,6 +68,38 @@ impl MinimalExecutor {
                 entry.value,
                 entry.clk,
             ));
+        }
+
+        if self.program().enable_untrusted_programs {
+            let page_prots = self.get_page_prot();
+
+            let page_prot_initialize_events = &mut record.global_page_prot_initialize_events;
+            page_prot_initialize_events.reserve_exact(page_prots.len());
+
+            let page_prot_finalize_events = &mut record.global_page_prot_finalize_events;
+            page_prot_finalize_events.reserve_exact(page_prots.len());
+
+            for page_idx in page_prots.keys() {
+                let record = page_prots.get(*page_idx).unwrap();
+
+                // Only push initialize event if the page prot idx is not in the initial page
+                // prot image.
+                if !self.program().page_prot_image.contains_key(page_idx) {
+                    page_prot_initialize_events.push(PageProtInitializeFinalizeEvent::initialize(
+                        *page_idx,
+                        DEFAULT_PAGE_PROT,
+                    ));
+                }
+
+                page_prot_finalize_events.push(PageProtInitializeFinalizeEvent {
+                    page_idx: *page_idx,
+                    page_prot: record.value,
+                    timestamp: record.timestamp,
+                });
+            }
+        } else {
+            let page_prots = self.get_page_prot();
+            assert!(page_prots.is_empty());
         }
     }
 

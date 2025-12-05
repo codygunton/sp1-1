@@ -58,6 +58,9 @@ sp1-zkvm = { workspace = true, features = ["lib"] }
 test-artifacts = { path = "../../test-artifacts" }
 
 [features]
+# TODO: when mprotect / trap is fully tested, we should remove
+# force-portable-executor from default feature list
+default = ["force-portable-executor"]
 bigint-rug = ["sp1-curves/bigint-rug"]
 profiling = [
   "dep:rustc-demangle",
@@ -65,6 +68,7 @@ profiling = [
   "dep:indicatif",
   "sp1-jit/profiling",
 ]
+force-portable-executor = []
 
 [lints]
 workspace = true

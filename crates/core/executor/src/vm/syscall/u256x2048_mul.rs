@@ -1,5 +1,5 @@
 use crate::{
-    events::{PrecompileEvent, U256xU2048MulEvent},
+    events::{PrecompileEvent, U256xU2048MulEvent, U256xU2048MulPageProtRecords},
     vm::syscall::SyscallRuntime,
     SyscallCode,
 };
@@ -25,27 +25,29 @@ pub(crate) fn u256xu2048_mul<'a, RT: SyscallRuntime<'a>>(
     let hi_ptr = hi_ptr_memory.value;
 
     // Read input values from memory records
-    let a_memory_records = rt.mr_slice(a_ptr, U256_NUM_WORDS);
+    let (a_memory_records, a_page_prot_records) = rt.mr_slice(a_ptr, U256_NUM_WORDS);
     let a: Vec<_> = a_memory_records.iter().map(|record| record.value).collect();
 
     rt.increment_clk();
 
-    let b_memory_records = rt.mr_slice(b_ptr, U2048_NUM_WORDS);
+    let (b_memory_records, b_page_prot_records) = rt.mr_slice(b_ptr, U2048_NUM_WORDS);
     let b: Vec<_> = b_memory_records.iter().map(|record| record.value).collect();
 
     // Increment clk so that the write is not at the same cycle as the read
     rt.increment_clk();
 
     // Read the computed results from memory records using mw_slice
-    let lo_memory_records = rt.mw_slice(lo_ptr, U2048_NUM_WORDS);
+    let (lo_memory_records, lo_page_prot_records) = rt.mw_slice(lo_ptr, U2048_NUM_WORDS);
     let lo: Vec<_> = lo_memory_records.iter().map(|record| record.value).collect();
 
     rt.increment_clk();
 
-    let hi_memory_records = rt.mw_slice(hi_ptr, U256_NUM_WORDS);
+    let (hi_memory_records, hi_page_prot_records) = rt.mw_slice(hi_ptr, U256_NUM_WORDS);
     let hi: Vec<_> = hi_memory_records.iter().map(|record| record.value).collect();
 
     if RT::TRACING {
+        let (local_mem_access, local_page_prot_access) = rt.postprocess_precompile();
+
         // Create and add the event
         let event = PrecompileEvent::U256xU2048Mul(U256xU2048MulEvent {
             clk,
@@ -63,8 +65,14 @@ pub(crate) fn u256xu2048_mul<'a, RT: SyscallRuntime<'a>>(
             b_memory_records,
             lo_memory_records,
             hi_memory_records,
-            local_mem_access: rt.postprocess_precompile(),
-            ..Default::default()
+            local_mem_access,
+            page_prot_records: U256xU2048MulPageProtRecords {
+                read_a_page_prot_records: a_page_prot_records,
+                read_b_page_prot_records: b_page_prot_records,
+                write_lo_page_prot_records: lo_page_prot_records,
+                write_hi_page_prot_records: hi_page_prot_records,
+            },
+            local_page_prot_access,
         });
 
         let syscall_event = rt.syscall_event(

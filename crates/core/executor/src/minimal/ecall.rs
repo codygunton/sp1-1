@@ -6,6 +6,7 @@ use super::{
         edwards::{edwards_add, edwards_decompress_syscall},
         fptower::{fp2_addsub_syscall, fp2_mul_syscall, fp_op_syscall},
         keccak::keccak_permute,
+        mprotect::mprotect_syscall,
         poseidon2::poseidon2,
         sha256::{sha256_compress, sha256_extend},
         uint256::uint256_mul,
@@ -31,6 +32,7 @@ use sp1_curves::{
 use sp1_jit::{RiscRegister, SyscallContext};
 
 // Used by the x86_64 JIT executor. When profiling is enabled, only compiled for tests.
+#[allow(dead_code)]
 #[cfg(all(
     target_arch = "x86_64",
     target_endian = "little",
@@ -156,8 +158,8 @@ pub fn ecall_handler(ctx: &mut impl SyscallContext, code: SyscallCode) -> u64 {
             ctx.set_exit_code(arg1 as u32);
             None
         }
-        SyscallCode::MPROTECT
-        | SyscallCode::VERIFY_SP1_PROOF
+        SyscallCode::MPROTECT => mprotect_syscall(ctx, arg1, arg2),
+        SyscallCode::VERIFY_SP1_PROOF
         | SyscallCode::COMMIT
         | SyscallCode::COMMIT_DEFERRED_PROOFS => None,
     }.unwrap_or(code as u64)

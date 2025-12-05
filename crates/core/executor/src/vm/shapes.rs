@@ -1,11 +1,11 @@
 use enum_map::EnumMap;
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
+use std::str::FromStr;
 
 use crate::{
-    vm::memory::CompressedMemory, Instruction, Opcode, RiscvAirId, ShardingThreshold, SyscallCode,
-    BYTE_NUM_ROWS, RANGE_NUM_ROWS,
+    events::NUM_PAGE_PROT_ENTRIES_PER_ROW_EXEC, vm::memory::CompressedMemory, Instruction, Opcode,
+    RiscvAirId, ShardingThreshold, SyscallCode, BYTE_NUM_ROWS, RANGE_NUM_ROWS,
 };
-use std::str::FromStr;
 
 /// The maximum trace area from padding with next multiple of 32.
 /// The correctness of this value is checked in the test `test_maximum_padding`.
@@ -22,6 +22,7 @@ pub const HALT_AREA: u64 = 1 << 18;
 pub const HALT_HEIGHT: u64 = 1 << 10;
 
 pub struct ShapeChecker {
+    enable_untrusted_programs: bool,
     program_len: u64,
     trace_area: u64,
     max_height: u64,
@@ -37,12 +38,23 @@ pub struct ShapeChecker {
     costs: EnumMap<RiscvAirId, u64>,
     // The number of local memory accesses during this cycle.
     pub(crate) local_mem_counts: u64,
+    /// The number of local page prot accesses during this cycle.
+    pub(crate) local_page_prot_counts: u64,
     /// Whether the last read was external, ie: it was read from a deferred precompile.
     is_last_read_external: CompressedMemory,
+    /// Whether the last page prot access was external, ie: it was read from a deferred precompile.
+    is_last_page_prot_access_external: HashMap<u64, bool>,
+    /// The number of instruction decode events that occurred in this shard.
+    shard_distinct_instructions: HashSet<u32>,
 }
 
 impl ShapeChecker {
-    pub fn new(program_len: u64, shard_start_clk: u64, elem_threshold: ShardingThreshold) -> Self {
+    pub fn new(
+        program_len: u64,
+        shard_start_clk: u64,
+        elem_threshold: ShardingThreshold,
+        enable_untrusted_programs: bool,
+    ) -> Self {
         let costs: HashMap<String, usize> =
             serde_json::from_str(include_str!("../artifacts/rv64im_costs.json")).unwrap();
         let costs: EnumMap<RiscvAirId, u64> =
@@ -59,6 +71,7 @@ impl ShapeChecker {
         );
 
         Self {
+            enable_untrusted_programs,
             program_len,
             trace_area: preprocessed_trace_area + MAXIMUM_PADDING_AREA + MAXIMUM_CYCLE_AREA,
             max_height: 0,
@@ -73,7 +86,21 @@ impl ShapeChecker {
             costs,
             // Assume that all registers will be touched in each shard.
             local_mem_counts: 32,
+            local_page_prot_counts: 0,
             is_last_read_external: CompressedMemory::new(),
+            is_last_page_prot_access_external: HashMap::new(),
+            shard_distinct_instructions: HashSet::new(),
+        }
+    }
+
+    #[inline]
+    pub fn handle_untrusted_instruction(&mut self, instruction: u32) {
+        self.trace_area += self.costs[RiscvAirId::InstructionFetch];
+        self.heights[RiscvAirId::InstructionFetch] += 1;
+        self.max_height = self.max_height.max(self.heights[RiscvAirId::InstructionFetch]);
+        if self.shard_distinct_instructions.insert(instruction) {
+            self.trace_area += self.costs[RiscvAirId::InstructionDecode];
+            self.heights[RiscvAirId::InstructionDecode] += 1;
         }
     }
 
@@ -91,27 +118,41 @@ impl ShapeChecker {
     }
 
     #[inline]
+    pub fn handle_page_prot_event(&mut self, page_idx: u64, clk: u64) {
+        let is_external = self.syscall_sent;
+        let is_first_read_this_shard = self.shard_start_clk > clk;
+        let is_last_page_prot_access_external =
+            self.is_last_page_prot_access_external.insert(page_idx, is_external).unwrap_or(false);
+
+        self.local_page_prot_counts += (is_first_read_this_shard
+            || (is_last_page_prot_access_external && !is_external))
+            as u64;
+    }
+
+    #[inline]
     pub fn handle_commit(&mut self) {
         self.is_commit_on = true;
     }
 
     #[inline]
     pub fn handle_retained_syscall(&mut self, syscall_code: SyscallCode) {
-        if let Some(syscall_air_id) = syscall_code.as_air_id() {
-            let rows_per_event = syscall_air_id.rows_per_event() as u64;
+        let syscall_air_id = if self.enable_untrusted_programs {
+            syscall_code.as_air_id_user().unwrap()
+        } else {
+            syscall_code.as_air_id().unwrap()
+        };
 
-            self.heights[syscall_air_id] += rows_per_event;
+        let rows_per_event = syscall_air_id.rows_per_event() as u64;
+        self.heights[syscall_air_id] += rows_per_event;
 
-            self.trace_area += rows_per_event * self.costs[syscall_air_id];
-            self.max_height = self.max_height.max(self.heights[syscall_air_id]);
+        self.trace_area += rows_per_event * self.costs[syscall_air_id];
+        self.max_height = self.max_height.max(self.heights[syscall_air_id]);
 
-            // Currently, all precompiles with `rows_per_event > 1` have the respective control
-            // chip.
-            if rows_per_event > 1 {
-                self.trace_area += self.costs[syscall_air_id
-                    .control_air_id()
-                    .expect("Controls AIRs are found for each precompile with rows_per_event > 1")];
-            }
+        // Currently, all precompiles with `rows_per_event > 1` have the respective control chip.
+        if rows_per_event > 1 {
+            self.trace_area += self.costs[syscall_air_id
+                .control_air_id(self.enable_untrusted_programs)
+                .expect("Controls AIRs are found for each precompile with rows_per_event > 1")];
         }
     }
 
@@ -123,7 +164,12 @@ impl ShapeChecker {
     /// Set the start clock of the shard.
     #[inline]
     pub fn reset(&mut self, clk: u64) {
-        *self = Self::new(self.program_len, clk, self.sharding_threshold);
+        *self = Self::new(
+            self.program_len,
+            clk,
+            self.sharding_threshold,
+            self.enable_untrusted_programs,
+        );
     }
 
     /// Check if the shard limit has been reached.
@@ -157,11 +203,19 @@ impl ShapeChecker {
         bump_clk_high: bool,
         is_load_x0: bool,
         needs_state_bump: bool,
+        num_page_prot_accesses: usize,
     ) {
         let touched_addresses: u64 = std::mem::take(&mut self.local_mem_counts);
+        let touched_pages: u64 = std::mem::take(&mut self.local_page_prot_counts);
         let syscall_sent = std::mem::take(&mut self.syscall_sent);
 
-        let riscv_air_id = if is_load_x0 {
+        let riscv_air_id = if self.enable_untrusted_programs {
+            if is_load_x0 {
+                RiscvAirId::LoadX0User
+            } else {
+                riscv_air_id_from_opcode_user(instruction.opcode)
+            }
+        } else if is_load_x0 {
             RiscvAirId::LoadX0
         } else {
             riscv_air_id_from_opcode(instruction.opcode)
@@ -178,9 +232,10 @@ impl ShapeChecker {
         self.max_height = self.max_height.max(self.heights[RiscvAirId::MemoryLocal]);
 
         // Increment for all the global interactions
-        self.trace_area +=
-            self.costs[RiscvAirId::Global] * (2 * touched_addresses + syscall_sent as u64);
-        self.heights[RiscvAirId::Global] += 2 * touched_addresses + syscall_sent as u64;
+        self.trace_area += self.costs[RiscvAirId::Global]
+            * (2 * touched_addresses + 2 * touched_pages + syscall_sent as u64);
+        self.heights[RiscvAirId::Global] +=
+            2 * touched_addresses + 2 * touched_pages + syscall_sent as u64;
         self.max_height = self.max_height.max(self.heights[RiscvAirId::Global]);
 
         // Increment by if bump_clk_high is needed
@@ -204,6 +259,22 @@ impl ShapeChecker {
             self.heights[RiscvAirId::SyscallCore] += 1;
             self.max_height = self.max_height.max(self.heights[RiscvAirId::SyscallCore]);
         }
+
+        // Increment for each page prot access
+        let prev_count = self.heights[RiscvAirId::PageProt];
+        let new_count = prev_count + num_page_prot_accesses as u64;
+
+        self.trace_area += self.costs[RiscvAirId::PageProt]
+            * (new_count.div_ceil(NUM_PAGE_PROT_ENTRIES_PER_ROW_EXEC as u64)
+                - prev_count.div_ceil(NUM_PAGE_PROT_ENTRIES_PER_ROW_EXEC as u64));
+        self.heights[RiscvAirId::PageProt] = new_count;
+        self.max_height =
+            self.max_height.max(new_count.div_ceil(NUM_PAGE_PROT_ENTRIES_PER_ROW_EXEC as u64));
+
+        // Increment for each touched pages in page prot local
+        self.trace_area += self.costs[RiscvAirId::PageProtLocal] * touched_pages;
+        self.heights[RiscvAirId::PageProtLocal] += touched_pages;
+        self.max_height = self.max_height.max(self.heights[RiscvAirId::PageProtLocal]);
     }
 }
 
@@ -244,6 +315,51 @@ pub fn riscv_air_id_from_opcode(opcode: Opcode) -> RiscvAirId {
         Opcode::AUIPC | Opcode::LUI => RiscvAirId::UType,
         Opcode::JAL => RiscvAirId::Jal,
         Opcode::JALR => RiscvAirId::Jalr,
+        Opcode::ECALL => RiscvAirId::SyscallInstrs,
+        _ => {
+            eprintln!("Unknown opcode: {opcode:?}");
+            unreachable!()
+        }
+    }
+}
+
+#[inline]
+pub fn riscv_air_id_from_opcode_user(opcode: Opcode) -> RiscvAirId {
+    match opcode {
+        Opcode::ADD => RiscvAirId::AddUser,
+        Opcode::ADDI => RiscvAirId::AddiUser,
+        Opcode::ADDW => RiscvAirId::AddwUser,
+        Opcode::SUB => RiscvAirId::SubUser,
+        Opcode::SUBW => RiscvAirId::SubwUser,
+        Opcode::XOR | Opcode::OR | Opcode::AND => RiscvAirId::BitwiseUser,
+        Opcode::SLT | Opcode::SLTU => RiscvAirId::LtUser,
+        Opcode::MUL | Opcode::MULH | Opcode::MULHU | Opcode::MULHSU | Opcode::MULW => {
+            RiscvAirId::MulUser
+        }
+        Opcode::DIV
+        | Opcode::DIVU
+        | Opcode::REM
+        | Opcode::REMU
+        | Opcode::DIVW
+        | Opcode::DIVUW
+        | Opcode::REMW
+        | Opcode::REMUW => RiscvAirId::DivRemUser,
+        Opcode::SLL | Opcode::SLLW => RiscvAirId::ShiftLeftUser,
+        Opcode::SRLW | Opcode::SRAW | Opcode::SRL | Opcode::SRA => RiscvAirId::ShiftRightUser,
+        Opcode::LB | Opcode::LBU => RiscvAirId::LoadByteUser,
+        Opcode::LH | Opcode::LHU => RiscvAirId::LoadHalfUser,
+        Opcode::LW | Opcode::LWU => RiscvAirId::LoadWordUser,
+        Opcode::LD => RiscvAirId::LoadDoubleUser,
+        Opcode::SB => RiscvAirId::StoreByteUser,
+        Opcode::SH => RiscvAirId::StoreHalfUser,
+        Opcode::SW => RiscvAirId::StoreWordUser,
+        Opcode::SD => RiscvAirId::StoreDoubleUser,
+        Opcode::BEQ | Opcode::BNE | Opcode::BLT | Opcode::BGE | Opcode::BLTU | Opcode::BGEU => {
+            RiscvAirId::BranchUser
+        }
+        Opcode::AUIPC | Opcode::LUI => RiscvAirId::UTypeUser,
+        Opcode::JAL => RiscvAirId::JalUser,
+        Opcode::JALR => RiscvAirId::JalrUser,
         Opcode::ECALL => RiscvAirId::SyscallInstrs,
         _ => {
             eprintln!("Unknown opcode: {opcode:?}");

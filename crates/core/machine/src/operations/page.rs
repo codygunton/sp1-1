@@ -253,7 +253,14 @@ impl<F: PrimeField32> AddressSlicePageProtOperation<F> {
         });
 
         if let Some(second_page_prot_access) = second_page_prot_access {
-            assert!(start_page_idx + 1 == end_page_idx);
+            assert!(
+                start_page_idx + 1 == end_page_idx,
+                "start_page_idx: {:?}, end_page_idx: {:?}, start_addr: {:?}, end_addr: {:?}",
+                start_page_idx,
+                end_page_idx,
+                start_addr,
+                end_addr
+            );
             self.page_prot_accesses[1].populate(second_page_prot_access, clk, record);
             record.add_byte_lookup_event(ByteLookupEvent {
                 opcode: ByteOpcode::AND,
@@ -261,6 +268,8 @@ impl<F: PrimeField32> AddressSlicePageProtOperation<F> {
                 b: permissions,
                 c: second_page_prot_access.page_prot,
             });
+        } else {
+            self.page_prot_accesses[1] = PageProtAccessCols::default();
         }
 
         self.is_page_protect_active = F::from_canonical_u32(is_page_protect_active);

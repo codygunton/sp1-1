@@ -4,8 +4,10 @@
 
 use sp1_jit::{
     debug::{self, DebugState},
-    MemValue, RiscRegister, SyscallContext, TraceChunkHeader, TraceChunkRaw,
+    MemValue, PageProtValue, RiscRegister, SyscallContext, TraceChunkHeader, TraceChunkRaw,
 };
+
+use sp1_primitives::consts::{PAGE_SIZE, PROT_EXEC, PROT_READ, PROT_WRITE};
 
 use std::{
     collections::VecDeque,
@@ -14,16 +16,17 @@ use std::{
     sync::{mpsc, Arc},
 };
 
-#[cfg(feature = "profiling")]
 use hashbrown::HashMap;
 
 use crate::{
+    disassembler::InstructionTranspiler, events::MemoryAccessPosition, memory::MAX_LOG_ADDR,
     minimal::ecall::ecall_handler, Instruction, Opcode, Program, Register, SyscallCode,
     CLK_INC as CLK_INC_32, HALT_PC, PC_INC as PC_INC_32,
 };
 
 mod cow;
-use cow::MaybeCowMemory;
+use cow::{MaybeCowMemory, MaybeCowPageProt};
+use rrs_lib::process_instruction;
 mod trace;
 use trace::TraceChunkBuffer;
 
@@ -36,6 +39,7 @@ pub struct MinimalExecutor {
     input: VecDeque<Vec<u8>>,
     registers: [u64; 32],
     memory: Box<MaybeCowMemory<MemValue>>,
+    page_prots: MaybeCowPageProt,
     traces: Option<TraceChunkBuffer>,
     pc: u64,
     clk: u64,
@@ -46,6 +50,8 @@ pub struct MinimalExecutor {
     hints: Vec<(u64, Vec<u8>)>,
     maybe_unconstrained: Option<UnconstrainedCtx>,
     debug_sender: Option<mpsc::SyncSender<Option<debug::State>>>,
+    transpiler: InstructionTranspiler,
+    decoded_instruction_cache: HashMap<u32, Instruction>,
     #[cfg(feature = "profiling")]
     profiler: Option<(crate::profiler::Profiler, std::io::BufWriter<std::fs::File>)>,
     /// Cycle tracker start times and depths, keyed by label name.
@@ -75,38 +81,29 @@ impl SyscallContext for MinimalExecutor {
     }
 
     fn mr(&mut self, addr: u64) -> u64 {
-        let mem_value = self.memory.entry(addr).or_default();
-        if self.traces.is_some() {
-            unsafe {
-                self.traces.as_mut().unwrap_unchecked().extend(&[*mem_value]);
-            }
+        self.mr(addr, PROT_READ, None)
+    }
 
-            mem_value.clk = self.clk;
-        }
-        mem_value.value
+    fn mr_without_prot(&mut self, addr: u64) -> u64 {
+        self.mr_without_prot(addr, None)
     }
 
     fn mw(&mut self, addr: u64, val: u64) {
-        let mem_value = self.memory.entry(addr).or_default();
-        if self.traces.is_some() {
-            unsafe {
-                self.traces.as_mut().unwrap_unchecked().extend(&[*mem_value]);
-            }
-        }
+        self.mw(addr, val, true, true, None);
+    }
 
-        mem_value.clk = self.clk;
-        mem_value.value = val;
+    fn mw_without_prot(&mut self, addr: u64, val: u64) {
+        self.mw(addr, val, true, false, None);
+    }
 
-        if self.traces.is_some() {
-            unsafe {
-                self.traces.as_mut().unwrap_unchecked().extend(&[*mem_value]);
-            }
-        }
+    fn prot_slice_check(&mut self, addr: u64, len: usize, prot_bitmap: u8, update_clk: bool) {
+        self.prot_slice_check(addr, len, prot_bitmap, update_clk);
     }
 
     fn mr_slice(&mut self, addr: u64, len: usize) -> impl IntoIterator<Item = &u64> {
-        let len = len as u64;
-        for i in 0..len {
+        self.prot_slice_check(addr, len, PROT_READ, true);
+
+        for i in 0..len as u64 {
             let mem_value = self.memory.entry(addr + i * 8).or_default();
             if self.traces.is_some() {
                 unsafe {
@@ -116,15 +113,14 @@ impl SyscallContext for MinimalExecutor {
             }
         }
 
-        (addr..addr + len * 8).step_by(8).map(|addr| unsafe {
+        (addr..addr + len as u64 * 8).step_by(8).map(|addr| unsafe {
             // SAFETY: We just inserted the entry if it didn't exist, so we know it exists
             &self.memory.get(addr).unwrap_unchecked().value
         })
     }
 
     fn mr_slice_unsafe(&mut self, addr: u64, len: usize) -> impl IntoIterator<Item = &u64> {
-        let len = len as u64;
-        for i in 0..len {
+        for i in 0..len as u64 {
             let mem_value = self.memory.entry(addr + i * 8).or_default();
             if self.traces.is_some() {
                 unsafe {
@@ -133,22 +129,39 @@ impl SyscallContext for MinimalExecutor {
             }
         }
 
-        (addr..addr + len * 8).step_by(8).map(|addr| unsafe {
+        (addr..addr + len as u64 * 8).step_by(8).map(|addr| unsafe {
             // SAFETY: We just inserted the entry if it didn't exist, so we know it exists
             &self.memory.get(addr).unwrap_unchecked().value
         })
     }
 
     fn mr_slice_no_trace(&mut self, addr: u64, len: usize) -> impl IntoIterator<Item = &u64> {
-        let len = len as u64;
-
-        (addr..addr + len * 8).step_by(8).map(|addr| self.memory.get(addr).map_or(&0, |v| &v.value))
+        (addr..addr + len as u64 * 8)
+            .step_by(8)
+            .map(|addr| self.memory.get(addr).map_or(&0, |v| &v.value))
     }
 
     fn mw_slice(&mut self, addr: u64, vals: &[u64]) {
+        self.prot_slice_check(addr, vals.len(), PROT_WRITE, true);
+
         for (i, val) in vals.iter().enumerate() {
-            self.mw(addr + 8 * i as u64, *val);
+            self.mw(addr + 8 * i as u64, *val, true, false, None);
         }
+    }
+
+    fn page_prot_write(&mut self, addr: u64, val: u8) {
+        assert!(addr.is_multiple_of(PAGE_SIZE as u64), "addr must be page aligned");
+        assert!(addr < 1 << MAX_LOG_ADDR, "addr must be less than 2^48");
+        assert!(
+            self.program.untrusted_memory.is_some_and(|(s, e)| addr >= s && addr < e),
+            "untrusted mode must be turned on, the requested page must be in untrusted memory region",
+        );
+
+        // pr is invoked here so the old page permission is kept in trace
+        self.pr(addr, false, None);
+
+        let page_idx = addr / PAGE_SIZE as u64;
+        self.page_prots.insert(page_idx, PageProtValue { timestamp: self.clk, value: val });
     }
 
     fn input_buffer(&mut self) -> &mut VecDeque<Vec<u8>> {
@@ -167,6 +180,7 @@ impl SyscallContext for MinimalExecutor {
         self.maybe_unconstrained =
             Some(UnconstrainedCtx { registers: self.registers, pc: self.pc, clk: self.clk });
         self.memory.copy_on_write();
+        self.page_prots.copy_on_write();
 
         Ok(())
     }
@@ -180,6 +194,7 @@ impl SyscallContext for MinimalExecutor {
         self.pc = unconstrained.pc;
         self.clk = unconstrained.clk;
         self.memory.owned();
+        self.page_prots.owned();
     }
 
     fn trace_hint(&mut self, addr: u64, value: Vec<u8>) {
@@ -245,6 +260,19 @@ impl MinimalExecutor {
             memory.insert(*addr, MemValue { clk: 0, value: *value });
         }
 
+        let page_prots = if program.enable_untrusted_programs {
+            program
+                .page_prot_image
+                .iter()
+                .map(|(page_idx, page_prot)| {
+                    (*page_idx, PageProtValue { timestamp: 0, value: *page_prot })
+                })
+                .collect::<HashMap<_, _>>()
+                .into()
+        } else {
+            HashMap::new().into()
+        };
+
         let mut result = Self {
             program,
             input: VecDeque::new(),
@@ -254,12 +282,15 @@ impl MinimalExecutor {
             pc,
             memory: Box::new(memory),
             traces: None,
+            page_prots,
             max_trace_size,
             public_values_stream: Vec::new(),
             hints: Vec::new(),
             maybe_unconstrained: None,
             debug_sender: None,
             exit_code: 0,
+            transpiler: InstructionTranspiler,
+            decoded_instruction_cache: HashMap::new(),
             #[cfg(feature = "profiling")]
             profiler: None,
             #[cfg(feature = "profiling")]
@@ -285,6 +316,7 @@ impl MinimalExecutor {
     ///   1.
     #[inline]
     #[allow(unused_variables)]
+    #[allow(clippy::unused_self)]
     fn maybe_setup_profiler(&mut self) {
         #[cfg(feature = "profiling")]
         {
@@ -500,6 +532,12 @@ impl MinimalExecutor {
         self.memory.get(addr).copied().unwrap_or_default()
     }
 
+    /// Get a view of the current page prot of the executor
+    #[must_use]
+    pub fn get_page_prot(&self) -> &MaybeCowPageProt {
+        &self.page_prots
+    }
+
     /// Get an unsafe memory view of the executor.
     #[must_use]
     pub fn unsafe_memory(&self) -> UnsafeMemory {
@@ -513,9 +551,46 @@ impl MinimalExecutor {
         todo!()
     }
 
+    #[inline]
+    fn fetch(&mut self) -> Option<Instruction> {
+        let instruction = self.program.fetch(self.pc);
+        if let Some(instruction) = instruction {
+            Some(*instruction)
+        } else if self.program.enable_untrusted_programs {
+            let aligned_pc = self.pc & !0b111;
+            let memory_value = self.mr(
+                aligned_pc,
+                PROT_READ | PROT_EXEC,
+                Some(MemoryAccessPosition::UntrustedInstruction),
+            );
+
+            let aligned_offset = self.pc - aligned_pc;
+            assert!(
+                self.pc.is_multiple_of(4),
+                "PC must be aligned to 4 bytes (pc=0x{:x})",
+                self.pc
+            );
+            let instruction_value: u32 =
+                (memory_value >> (aligned_offset * 8) & 0xffffffff).try_into().unwrap();
+
+            let instruction = if let Some(cached_instruction) =
+                self.decoded_instruction_cache.get(&instruction_value)
+            {
+                *cached_instruction
+            } else {
+                let instruction =
+                    process_instruction(&mut self.transpiler, instruction_value).unwrap();
+                self.decoded_instruction_cache.insert(instruction_value, instruction);
+                instruction
+            };
+            Some(instruction)
+        } else {
+            None
+        }
+    }
+
     fn execute_instruction(&mut self) -> bool {
-        let program = self.program.clone();
-        let instruction = program.fetch(self.pc).unwrap();
+        let instruction = self.fetch().unwrap();
         if let Some(sender) = &self.debug_sender {
             sender.send(Some(self.current_state())).expect("Failed to send debug state");
         }
@@ -529,19 +604,19 @@ impl MinimalExecutor {
         let mut next_pc = self.pc.wrapping_add(PC_INC);
         let mut next_clk = self.clk.wrapping_add(CLK_INC);
         if instruction.is_alu_instruction() {
-            self.execute_alu(instruction);
+            self.execute_alu(&instruction);
         } else if instruction.is_memory_load_instruction() {
-            self.execute_load(instruction);
+            self.execute_load(&instruction);
         } else if instruction.is_memory_store_instruction() {
-            self.execute_store(instruction);
+            self.execute_store(&instruction);
         } else if instruction.is_branch_instruction() {
-            self.execute_branch(instruction, &mut next_pc);
+            self.execute_branch(&instruction, &mut next_pc);
         } else if instruction.is_jump_instruction() {
-            self.execute_jump(instruction, &mut next_pc);
+            self.execute_jump(&instruction, &mut next_pc);
         } else if instruction.is_utype_instruction() {
-            self.execute_utype(instruction);
+            self.execute_utype(&instruction);
         } else if instruction.is_ecall_instruction() {
-            self.execute_ecall(instruction, &mut next_pc, &mut next_clk);
+            self.execute_ecall(&instruction, &mut next_pc, &mut next_clk);
         } else {
             unreachable!("Invalid opcode for `execute_instruction`: {:?}", instruction.opcode)
         }
@@ -561,6 +636,108 @@ impl MinimalExecutor {
         self.is_done() || trace_buf_size_exceeded
     }
 
+    /// `prot_slice_check` only issues one page permission check per page touched
+    #[inline]
+    fn prot_slice_check(&mut self, addr: u64, len: usize, prot_bitmap: u8, update_clk: bool) {
+        let first_page_idx = addr / (PAGE_SIZE as u64);
+        let last_page_idx = (addr + (len - 1) as u64 * 8) / (PAGE_SIZE as u64);
+
+        for page_idx in first_page_idx..=last_page_idx {
+            self.prot_check(page_idx * (PAGE_SIZE as u64), prot_bitmap, update_clk, None);
+        }
+    }
+
+    #[inline]
+    fn prot_check(
+        &mut self,
+        addr: u64,
+        prot_bitmap: u8,
+        update_clk: bool,
+        position: Option<MemoryAccessPosition>,
+    ) {
+        if self.program.enable_untrusted_programs {
+            let prot = self.pr(addr, update_clk, position);
+            assert!(prot & prot_bitmap == prot_bitmap);
+        }
+    }
+
+    /// Modeled just like rr and mr, pr stands for "permission reading" in this case
+    #[inline]
+    fn pr(&mut self, addr: u64, update_clk: bool, position: Option<MemoryAccessPosition>) -> u8 {
+        let page_prot_value = self.page_prots.entry(addr / PAGE_SIZE as u64).or_default();
+
+        if self.traces.is_some() && self.maybe_unconstrained.is_none() {
+            unsafe {
+                self.traces.as_mut().unwrap_unchecked().extend(&[(*page_prot_value).into()]);
+            }
+        }
+
+        if update_clk {
+            page_prot_value.timestamp =
+                self.clk + if let Some(position) = position { position as u64 } else { 0 };
+        }
+        page_prot_value.value
+    }
+
+    /// Memory load, shared by load instructions and untrusted instruction fetch
+    #[inline]
+    fn mr(
+        &mut self,
+        aligned_addr: u64,
+        page_prot_bitmap: u8,
+        position: Option<MemoryAccessPosition>,
+    ) -> u64 {
+        self.prot_check(aligned_addr, page_prot_bitmap, true, position);
+        self.mr_without_prot(aligned_addr, position)
+    }
+
+    #[inline]
+    fn mr_without_prot(
+        &mut self,
+        aligned_addr: u64,
+        position: Option<MemoryAccessPosition>,
+    ) -> u64 {
+        let mem_value = self.memory.entry(aligned_addr).or_default();
+        if self.traces.is_some() && self.maybe_unconstrained.is_none() {
+            unsafe {
+                self.traces.as_mut().unwrap_unchecked().extend(&[*mem_value]);
+            }
+        }
+
+        mem_value.clk = self.clk + if let Some(position) = position { position as u64 } else { 0 };
+        mem_value.value
+    }
+
+    /// Memory store, shared by instructions and precompiles
+    #[inline]
+    fn mw(
+        &mut self,
+        aligned_addr: u64,
+        value: u64,
+        push_new_value: bool,
+        check_page_prot: bool,
+        position: Option<MemoryAccessPosition>,
+    ) {
+        if check_page_prot {
+            self.prot_check(aligned_addr, PROT_WRITE, true, position);
+        }
+
+        let mem_value = self.memory.entry(aligned_addr).or_default();
+        if self.traces.is_some() && self.maybe_unconstrained.is_none() {
+            unsafe {
+                self.traces.as_mut().unwrap_unchecked().extend(&[*mem_value]);
+            }
+        }
+        mem_value.clk = self.clk + if let Some(position) = position { position as u64 } else { 0 };
+        mem_value.value = value;
+
+        if push_new_value && self.traces.is_some() && self.maybe_unconstrained.is_none() {
+            unsafe {
+                self.traces.as_mut().unwrap_unchecked().extend(&[*mem_value]);
+            }
+        }
+    }
+
     /// Execute a load instruction.
     #[inline]
     fn execute_load(&mut self, instruction: &Instruction) {
@@ -569,15 +746,7 @@ impl MinimalExecutor {
         let addr = base.wrapping_add(imm_offset);
         let aligned_addr = addr & !0b111;
 
-        let mem_value = self.memory.entry(aligned_addr).or_default();
-        if self.traces.is_some() && self.maybe_unconstrained.is_none() {
-            unsafe {
-                self.traces.as_mut().unwrap_unchecked().extend(&[*mem_value]);
-            }
-        }
-
-        mem_value.clk = self.clk + 1;
-        let value = mem_value.value;
+        let value = self.mr(aligned_addr, PROT_READ, Some(MemoryAccessPosition::Memory));
 
         self.registers[rd as usize] = match instruction.opcode {
             Opcode::LB => ((value >> ((addr % 8) * 8)) & 0xFF) as i8 as i64 as u64,
@@ -655,14 +824,8 @@ impl MinimalExecutor {
             }
             _ => unreachable!(),
         };
-        let mem_value = self.memory.entry(aligned_addr).or_default();
-        if self.traces.is_some() && self.maybe_unconstrained.is_none() {
-            unsafe {
-                self.traces.as_mut().unwrap_unchecked().extend(&[*mem_value]);
-            }
-        }
-        mem_value.clk = self.clk + 1;
-        mem_value.value = value;
+
+        self.mw(aligned_addr, value, false, true, Some(MemoryAccessPosition::Memory));
     }
 
     /// Execute an ALU instruction.

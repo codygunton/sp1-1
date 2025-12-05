@@ -6832,6 +6832,7 @@ dependencies = [
  "memfd",
  "memmap2",
  "serde",
+ "sp1-primitives 6.0.0",
  "tracing",
  "uuid",
 ]

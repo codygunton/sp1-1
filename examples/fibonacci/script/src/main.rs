@@ -10,7 +10,7 @@ async fn main() {
     sp1_sdk::utils::setup_logger();
 
     // Create an input stream and write '500' to it.
-    let n = 700_000u32;
+    let n = 70u32;
 
     // The input stream that the program will read from using `sp1_zkvm::io::read`. Note that the
     // types of the elements in the input stream must match the types being read in the program.

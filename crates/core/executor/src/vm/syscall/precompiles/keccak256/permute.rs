@@ -1,5 +1,5 @@
 use crate::{
-    events::{KeccakPermuteEvent, PrecompileEvent},
+    events::{KeccakPermuteEvent, KeccakPermutePageProtRecords, PrecompileEvent},
     vm::syscall::SyscallRuntime,
     SyscallCode,
 };
@@ -21,14 +21,18 @@ pub fn keccak256_permute<'a, RT: SyscallRuntime<'a>>(
     let start_clk = rt.core().clk();
 
     // Read the current state (will be overwritten)
-    let state_read_records = rt.mr_slice(state_ptr, STATE_NUM_WORDS);
+    let (state_read_records, state_read_page_prot_records) =
+        rt.mr_slice(state_ptr, STATE_NUM_WORDS);
 
     rt.increment_clk();
 
     // Write the new state (we don't compute the actual result in tracing mode)
-    let state_write_records = rt.mw_slice(state_ptr, STATE_NUM_WORDS);
+    let (state_write_records, state_write_page_prot_records) =
+        rt.mw_slice(state_ptr, STATE_NUM_WORDS);
 
     if RT::TRACING {
+        let (local_mem_access, local_page_prot_access) = rt.postprocess_precompile();
+
         let post_state: Vec<u64> = state_write_records.iter().map(|record| record.value).collect();
         let pre_state: Vec<u64> = state_read_records.iter().map(|record| record.value).collect();
 
@@ -39,8 +43,12 @@ pub fn keccak256_permute<'a, RT: SyscallRuntime<'a>>(
             state_read_records,
             state_write_records,
             state_addr: state_ptr,
-            local_mem_access: rt.postprocess_precompile(),
-            ..Default::default()
+            local_mem_access,
+            page_prot_records: KeccakPermutePageProtRecords {
+                read_pre_state_page_prot_records: state_read_page_prot_records,
+                write_post_state_page_prot_records: state_write_page_prot_records,
+            },
+            local_page_prot_access,
         };
 
         let syscall_event = rt.syscall_event(

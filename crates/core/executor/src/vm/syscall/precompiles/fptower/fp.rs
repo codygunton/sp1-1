@@ -5,7 +5,7 @@ use sp1_curves::{
 use typenum::Unsigned;
 
 use crate::{
-    events::{FpOpEvent, PrecompileEvent},
+    events::{FpOpEvent, FpPageProtRecords, PrecompileEvent},
     vm::syscall::SyscallRuntime,
     SyscallCode,
 };
@@ -22,6 +22,7 @@ pub fn fp_op<'a, RT: SyscallRuntime<'a>, P: FpOpField>(
     assert!(y_ptr.is_multiple_of(8), "y_ptr must be 8-byte aligned");
 
     let clk = rt.core().clk();
+
     let num_words = <P as NumWords>::WordsFieldElement::USIZE;
 
     // Read x (current value that will be overwritten) using mr_slice_unsafe
@@ -29,15 +30,17 @@ pub fn fp_op<'a, RT: SyscallRuntime<'a>, P: FpOpField>(
     let x = rt.mr_slice_unsafe(num_words);
 
     // Read y using mr_slice - returns records
-    let y_memory_records = rt.mr_slice(y_ptr, num_words);
+    let (y_memory_records, y_page_prot_records) = rt.mr_slice(y_ptr, num_words);
     let y: Vec<u64> = y_memory_records.iter().map(|record| record.value).collect();
 
     rt.increment_clk();
 
     // Write result to x (we don't compute the actual result in tracing mode)
-    let x_memory_records = rt.mw_slice(x_ptr, num_words);
+    let (x_memory_records, x_page_prot_records) = rt.mw_slice(x_ptr, num_words);
 
     if RT::TRACING {
+        let (local_mem_access, local_page_prot_access) = rt.postprocess_precompile();
+
         let op = syscall_code.fp_op_map();
         let event = FpOpEvent {
             clk,
@@ -48,8 +51,12 @@ pub fn fp_op<'a, RT: SyscallRuntime<'a>, P: FpOpField>(
             op,
             x_memory_records,
             y_memory_records,
-            local_mem_access: rt.postprocess_precompile(),
-            ..Default::default()
+            local_mem_access,
+            page_prot_records: FpPageProtRecords {
+                read_page_prot_records: y_page_prot_records,
+                write_page_prot_records: x_page_prot_records,
+            },
+            local_page_prot_access,
         };
 
         // Group all events for a specific curve into the same syscall code key
