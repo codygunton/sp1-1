@@ -15,10 +15,12 @@ pub unsafe fn edwards_decompress_syscall(
     assert!(slice_ptr.is_multiple_of(4), "Pointer must be 4-byte aligned.");
     assert!(sign <= 1, "Sign bit must be 0 or 1.");
 
+    let clk = ctx.get_current_clk();
     ctx.read_slice_check(slice_ptr + (COMPRESSED_POINT_BYTES as u64), WORDS_FIELD_ELEMENT)?;
     ctx.bump_memory_clk();
     ctx.write_slice_check(slice_ptr, WORDS_FIELD_ELEMENT)?;
 
+    ctx.set_clk(clk);
     let y =
         ctx.mr_slice_without_prot(slice_ptr + (COMPRESSED_POINT_BYTES as u64), WORDS_FIELD_ELEMENT);
     let y_bytes: [u8; COMPRESSED_POINT_BYTES] = words_to_bytes_le(y);

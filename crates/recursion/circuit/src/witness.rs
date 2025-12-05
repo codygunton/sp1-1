@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use crate::{
     basefold::{stacked::RecursiveStackedPcsProof, RecursiveBasefoldProof},
     hash::FieldHasherVariable,
@@ -10,6 +8,7 @@ use slop_algebra::{extension::BinomialExtensionField, AbstractExtensionField, Ab
 use slop_bn254::Bn254Fr;
 use slop_challenger::{GrindingChallenger, IopCtx};
 use slop_commit::Rounds;
+use sp1_hypercube::UntrustedConfig;
 use sp1_hypercube::{
     septic_curve::SepticCurve, septic_digest::SepticDigest, septic_extension::SepticExtension,
     AirOpenedValues, ChipOpenedValues, MachineVerifyingKey, ShardOpenedValues, ShardProof,
@@ -21,6 +20,7 @@ use sp1_recursion_compiler::{
     ir::{Builder, Ext, Felt, Var},
 };
 use sp1_recursion_executor::Block;
+use std::collections::BTreeMap;
 
 pub trait WitnessWriter<C: CircuitConfig>: Sized {
     fn write_bit(&mut self, value: bool);
@@ -323,6 +323,31 @@ where
     }
 }
 
+impl<C> Witnessable<C> for UntrustedConfig<SP1Field>
+where
+    C: CircuitConfig,
+{
+    type WitnessVariable = UntrustedConfig<Felt<SP1Field>>;
+    fn read(&self, builder: &mut Builder<C>) -> Self::WitnessVariable {
+        let enable_untrusted_programs = self.enable_untrusted_programs.read(builder);
+        let enable_trap_handler = self.enable_trap_handler.read(builder);
+        let trap_context = self.trap_context.read(builder);
+        let untrusted_memory = self.untrusted_memory.read(builder);
+        Self::WitnessVariable {
+            enable_untrusted_programs,
+            enable_trap_handler,
+            trap_context,
+            untrusted_memory,
+        }
+    }
+
+    fn write(&self, witness: &mut impl WitnessWriter<C>) {
+        self.enable_untrusted_programs.write(witness);
+        self.enable_trap_handler.write(witness);
+        self.trap_context.write(witness);
+        self.untrusted_memory.write(witness);
+    }
+}
 impl<C, GC> Witnessable<C> for MachineVerifyingKey<GC>
 where
     C: CircuitConfig,
@@ -336,12 +361,12 @@ where
         let pc_start = self.pc_start.read(builder);
         let initial_global_cumulative_sum = self.initial_global_cumulative_sum.read(builder);
         let preprocessed_commit = self.preprocessed_commit.read(builder);
-        let enable_untrusted_programs = self.enable_untrusted_programs.read(builder);
+        let untrusted_config = self.untrusted_config.read(builder);
         Self::WitnessVariable {
             pc_start,
             initial_global_cumulative_sum,
             preprocessed_commit,
-            enable_untrusted_programs,
+            untrusted_config,
         }
     }
 
@@ -349,6 +374,6 @@ where
         self.pc_start.write(witness);
         self.initial_global_cumulative_sum.write(witness);
         self.preprocessed_commit.write(witness);
-        self.enable_untrusted_programs.write(witness);
+        self.untrusted_config.write(witness);
     }
 }

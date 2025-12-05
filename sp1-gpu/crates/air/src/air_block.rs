@@ -307,6 +307,10 @@ where
         let local = main.row_slice(0);
         let local: &WeierstrassAddAssignCols<SymbolicVarF, E::BaseField, M> = (*local).borrow();
 
+        if !M::IS_TRUSTED {
+            todo!("Implement trap mode on GPU!");
+        }
+
         let num_words_field_element = <E::BaseField as NumLimbs>::Limbs::USIZE / 8;
 
         // It's very important that the `generate_limbs` function do not call `assert_zero`.
@@ -504,6 +508,7 @@ where
                     local.clk_high,
                     local.clk_low,
                     syscall_id_felt,
+                    SymbolicExprF::zero(),
                     p_ptr.map(Into::into),
                     q_ptr.map(Into::into),
                     local.is_real,
@@ -529,6 +534,10 @@ where
         let main = builder.main();
         let local = main.row_slice(0);
         let local: &WeierstrassDoubleAssignCols<SymbolicVarF, E::BaseField, M> = (*local).borrow();
+
+        if !M::IS_TRUSTED {
+            todo!("Implement trap mode on GPU!");
+        }
 
         let num_words_field_element = <E::BaseField as NumLimbs>::Limbs::USIZE / 8;
 
@@ -697,6 +706,7 @@ where
                     local.clk_high,
                     local.clk_low,
                     syscall_id_felt,
+                    SymbolicExprF::zero(),
                     p_ptr.map(Into::into),
                     [SymbolicExprF::zero(), SymbolicExprF::zero(), SymbolicExprF::zero()],
                     local.is_real,

@@ -28,13 +28,14 @@ pub(crate) unsafe fn sha256_compress(
     let h_ptr = arg2;
     assert_ne!(w_ptr, h_ptr);
 
+    let clk = ctx.get_current_clk();
     ctx.read_slice_check(h_ptr, 8)?;
+    ctx.bump_memory_clk();
     ctx.read_slice_check(w_ptr, 64)?;
     ctx.bump_memory_clk();
     ctx.write_slice_check(h_ptr, 8)?;
 
-    // let start_clk = ctx.clk;
-
+    ctx.set_clk(clk);
     // Execute the "initialize" phase where we read in the h values.
     let hx: Vec<_> = ctx.mr_slice_without_prot(h_ptr, 8).into_iter().map(|h| *h as u32).collect();
 

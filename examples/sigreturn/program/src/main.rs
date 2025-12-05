@@ -16,11 +16,7 @@ pub struct TrapContext {
 
 #[no_mangle]
 #[used]
-pub static mut __SUCCINCT_TRAP_CONTEXT: TrapContext = TrapContext {
-    handler: 1,
-    code: 0,
-    pc: 1
-};
+pub static mut __SUCCINCT_TRAP_CONTEXT: TrapContext = TrapContext { handler: 1, code: 0, pc: 1 };
 
 pub fn install_trap_handler(h: extern "C" fn()) {
     unsafe {
@@ -81,6 +77,8 @@ pub extern "C" fn sp1_trap_trap_trap() {
         "sd a0, 0(sp)",
         // Set a0(first argument of syscall) to point to the register array.
         "mv a0, sp",
+        // Set a1 to zero.
+        "li a1, 0",
         // Set syscall code to sigreturn.
         "li t0, 0x134",
         // Now execute the ecall, this should never return.

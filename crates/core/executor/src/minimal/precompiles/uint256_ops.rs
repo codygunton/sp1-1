@@ -34,13 +34,18 @@ pub unsafe fn uint256_ops(
     let d_ptr = ctx.rr(X13);
     let e_ptr = ctx.rr(X14);
 
+    let clk = ctx.get_current_clk();
     ctx.read_slice_check(a_ptr, U256_NUM_WORDS)?;
+    ctx.bump_memory_clk();
     ctx.read_slice_check(b_ptr, U256_NUM_WORDS)?;
+    ctx.bump_memory_clk();
     ctx.read_slice_check(c_ptr, U256_NUM_WORDS)?;
     ctx.bump_memory_clk();
     ctx.write_slice_check(d_ptr, 4)?;
+    ctx.bump_memory_clk();
     ctx.write_slice_check(e_ptr, 4)?;
 
+    ctx.set_clk(clk);
     // Read input values (8 words = 32 bytes each for uint256) and convert to BigUint
     let uint256_a = {
         let a = ctx.mr_slice_without_prot(a_ptr, U256_NUM_WORDS);

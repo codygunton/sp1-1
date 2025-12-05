@@ -200,17 +200,38 @@ impl<F: PrimeField32, M: TrustMode> MachineAir<F> for Uint256MulChip<M> {
 
                     let modulus_ptr = event.y_ptr + WORDS_FIELD_ELEMENT as u64 * 8;
 
+                    let mut is_not_trap = true;
+                    let mut trap_code = 0u8;
+
+                    if !M::IS_TRUSTED {
+                        let cols: &mut Uint256MulCols<F, UserMode> = row.borrow_mut();
+                        // Populate page protection operations (once per event, not per word)
+                        cols.address_slice_page_prot_access_y.populate(
+                            &mut new_byte_lookup_events,
+                            event.y_ptr,
+                            event.y_ptr + ((WORDS_FIELD_ELEMENT * 2 - 1) * 8) as u64,
+                            event.clk,
+                            PROT_READ,
+                            &event.page_prot_records.read_y_modulus_page_prot_records,
+                            &mut is_not_trap,
+                            &mut trap_code,
+                        );
+
+                        cols.address_slice_page_prot_access_x.populate(
+                            &mut new_byte_lookup_events,
+                            event.x_ptr,
+                            event.x_ptr + ((WORDS_FIELD_ELEMENT - 1) * 8) as u64,
+                            event.clk + 1,
+                            PROT_READ | PROT_WRITE,
+                            &event.page_prot_records.write_x_page_prot_records,
+                            &mut is_not_trap,
+                            &mut trap_code,
+                        );
+                    }
+
+                    let cols: &mut Uint256MulCols<F, M> = row.borrow_mut();
                     // Populate memory columns.
                     for i in 0..WORDS_FIELD_ELEMENT {
-                        let x_memory_record = MemoryRecordEnum::Write(event.x_memory_records[i]);
-                        let y_memory_record = MemoryRecordEnum::Read(event.y_memory_records[i]);
-                        let modulus_memory_record =
-                            MemoryRecordEnum::Read(event.modulus_memory_records[i]);
-                        cols.x_memory[i].populate(x_memory_record, &mut new_byte_lookup_events);
-                        cols.y_memory[i].populate(y_memory_record, &mut new_byte_lookup_events);
-                        cols.modulus_memory[i]
-                            .populate(modulus_memory_record, &mut new_byte_lookup_events);
-
                         cols.x_addrs[i].populate(
                             &mut new_byte_lookup_events,
                             event.x_ptr,
@@ -228,6 +249,22 @@ impl<F: PrimeField32, M: TrustMode> MachineAir<F> for Uint256MulChip<M> {
                             modulus_ptr,
                             8 * i as u64,
                         );
+
+                        if is_not_trap {
+                            let x_memory_record =
+                                MemoryRecordEnum::Write(event.x_memory_records[i]);
+                            let y_memory_record = MemoryRecordEnum::Read(event.y_memory_records[i]);
+                            let modulus_memory_record =
+                                MemoryRecordEnum::Read(event.modulus_memory_records[i]);
+                            cols.x_memory[i].populate(x_memory_record, &mut new_byte_lookup_events);
+                            cols.y_memory[i].populate(y_memory_record, &mut new_byte_lookup_events);
+                            cols.modulus_memory[i]
+                                .populate(modulus_memory_record, &mut new_byte_lookup_events);
+                        } else {
+                            cols.x_memory[i] = MemoryAccessColsU8::default();
+                            cols.y_memory[i] = MemoryAccessColsU8::default();
+                            cols.modulus_memory[i] = MemoryAccessColsU8::default();
+                        }
                     }
 
                     let modulus_bytes = words_to_bytes_le_vec(&event.modulus);
@@ -251,35 +288,6 @@ impl<F: PrimeField32, M: TrustMode> MachineAir<F> for Uint256MulChip<M> {
                             &mut new_byte_lookup_events,
                             &result,
                             &effective_modulus,
-                        );
-                    }
-                    if !M::IS_TRUSTED {
-                        let cols: &mut Uint256MulCols<F, UserMode> = row.borrow_mut();
-                        // Populate page protection operations (once per event, not per word)
-                        cols.address_slice_page_prot_access_y.populate(
-                            &mut new_byte_lookup_events,
-                            event.y_ptr,
-                            event.y_ptr + ((WORDS_FIELD_ELEMENT * 2 - 1) * 8) as u64,
-                            event.clk,
-                            PROT_READ,
-                            &event.page_prot_records.read_y_modulus_page_prot_records[0],
-                            &event
-                                .page_prot_records
-                                .read_y_modulus_page_prot_records
-                                .get(1)
-                                .copied(),
-                            input.public_values.is_untrusted_programs_enabled,
-                        );
-
-                        cols.address_slice_page_prot_access_x.populate(
-                            &mut new_byte_lookup_events,
-                            event.x_ptr,
-                            event.x_ptr + ((WORDS_FIELD_ELEMENT - 1) * 8) as u64,
-                            event.clk + 1,
-                            PROT_READ | PROT_WRITE,
-                            &event.page_prot_records.write_x_page_prot_records[0],
-                            &event.page_prot_records.write_x_page_prot_records.get(1).copied(),
-                            input.public_values.is_untrusted_programs_enabled,
                         );
                     }
                 }
@@ -335,15 +343,50 @@ where
         let local = main.row_slice(0);
         let local: &Uint256MulCols<AB::Var, M> = (*local).borrow();
 
+        let mut is_not_trap = local.is_real.into();
+        let mut trap_code = AB::Expr::zero();
+
+        // Evaluate the page prot accesses only for user mode.
+        if !M::IS_TRUSTED {
+            let local = main.row_slice(0);
+            let local: &Uint256MulCols<AB::Var, UserMode> = (*local).borrow();
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into(),
+                &local.y_ptr.addr.map(Into::into),
+                &local.y_and_modulus_addrs[local.y_and_modulus_addrs.len() - 1]
+                    .value
+                    .map(Into::into),
+                PROT_READ,
+                &local.address_slice_page_prot_access_y,
+                &mut is_not_trap,
+                &mut trap_code,
+            );
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into() + AB::Expr::one(),
+                &local.x_ptr.addr.map(Into::into),
+                &local.x_addrs[local.x_addrs.len() - 1].value.map(Into::into),
+                PROT_READ | PROT_WRITE,
+                &local.address_slice_page_prot_access_x,
+                &mut is_not_trap,
+                &mut trap_code,
+            );
+        }
+
         // We are computing (x * y) % modulus. The value of x is stored in the "prev_value" of
         // the x_memory, since we write to it later.
-        let x_limb_vec = builder.generate_limbs(&local.x_memory, local.is_real.into());
+        let x_limb_vec = builder.generate_limbs(&local.x_memory, is_not_trap.clone());
         let x_limbs: Limbs<AB::Expr, <U256Field as NumLimbs>::Limbs> =
             Limbs(x_limb_vec.try_into().expect("failed to convert limbs"));
-        let y_limb_vec = builder.generate_limbs(&local.y_memory, local.is_real.into());
+        let y_limb_vec = builder.generate_limbs(&local.y_memory, is_not_trap.clone());
         let y_limbs: Limbs<AB::Expr, <U256Field as NumLimbs>::Limbs> =
             Limbs(y_limb_vec.try_into().expect("failed to convert limbs"));
-        let modulus_limb_vec = builder.generate_limbs(&local.modulus_memory, local.is_real.into());
+        let modulus_limb_vec = builder.generate_limbs(&local.modulus_memory, is_not_trap.clone());
         let modulus_limbs: Limbs<AB::Expr, <U256Field as NumLimbs>::Limbs> =
             Limbs(modulus_limb_vec.try_into().expect("failed to convert limbs"));
 
@@ -433,7 +476,7 @@ where
             &local.x_addrs.map(|addr| addr.value.map(Into::into)),
             &local.x_memory.iter().map(|access| access.memory_access).collect_vec(),
             result_words,
-            local.is_real,
+            is_not_trap.clone(),
         );
 
         // Evaluate the y_ptr memory access. We concatenate y and modulus into a single array since
@@ -447,7 +490,7 @@ where
                 .iter()
                 .map(|access| access.memory_access)
                 .collect_vec(),
-            local.is_real,
+            is_not_trap.clone(),
         );
 
         // Receive the arguments.
@@ -455,6 +498,7 @@ where
             local.clk_high,
             local.clk_low.into(),
             AB::F::from_canonical_u32(SyscallCode::UINT256_MUL.syscall_id()),
+            trap_code.clone(),
             x_ptr.map(Into::into),
             y_ptr.map(Into::into),
             local.is_real,
@@ -465,35 +509,5 @@ where
             builder.extract_public_values().is_untrusted_programs_enabled,
             AB::Expr::from_bool(!M::IS_TRUSTED),
         );
-
-        // Evaluate the page prot accesses only for user mode.
-        if !M::IS_TRUSTED {
-            let local = main.row_slice(0);
-            let local: &Uint256MulCols<AB::Var, UserMode> = (*local).borrow();
-
-            AddressSlicePageProtOperation::<AB::F>::eval(
-                builder,
-                local.clk_high.into(),
-                local.clk_low.into(),
-                &y_ptr.map(Into::into),
-                &local.y_and_modulus_addrs[local.y_and_modulus_addrs.len() - 1]
-                    .value
-                    .map(Into::into),
-                AB::Expr::from_canonical_u8(PROT_READ),
-                &local.address_slice_page_prot_access_y,
-                local.is_real.into(),
-            );
-
-            AddressSlicePageProtOperation::<AB::F>::eval(
-                builder,
-                local.clk_high.into(),
-                local.clk_low.into() + AB::Expr::one(),
-                &x_ptr.map(Into::into),
-                &local.x_addrs[local.x_addrs.len() - 1].value.map(Into::into),
-                AB::Expr::from_canonical_u8(PROT_READ | PROT_WRITE),
-                &local.address_slice_page_prot_access_x,
-                local.is_real.into(),
-            );
-        }
     }
 }

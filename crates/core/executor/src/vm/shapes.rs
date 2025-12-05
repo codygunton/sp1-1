@@ -1,10 +1,11 @@
 use enum_map::EnumMap;
 use hashbrown::{HashMap, HashSet};
-use std::str::FromStr;
+use std::{marker::PhantomData, str::FromStr};
 
 use crate::{
-    events::NUM_PAGE_PROT_ENTRIES_PER_ROW_EXEC, vm::memory::CompressedMemory, Instruction, Opcode,
-    RiscvAirId, ShardingThreshold, SyscallCode, BYTE_NUM_ROWS, RANGE_NUM_ROWS,
+    events::NUM_PAGE_PROT_ENTRIES_PER_ROW_EXEC, vm::memory::CompressedMemory, ExecutionMode,
+    Instruction, Opcode, RiscvAirId, ShardingThreshold, SupervisorMode, SyscallCode, UserMode,
+    BYTE_NUM_ROWS, RANGE_NUM_ROWS,
 };
 
 /// The maximum trace area from padding with next multiple of 32.
@@ -21,8 +22,11 @@ pub const HALT_AREA: u64 = 1 << 18;
 /// The maximum height from the `syscall_halt` function.
 pub const HALT_HEIGHT: u64 = 1 << 10;
 
-pub struct ShapeChecker {
-    enable_untrusted_programs: bool,
+/// Shape checker for tracking trace area and determining shard boundaries.
+///
+/// The type parameter `M` determines whether page protection checks are enabled.
+pub struct ShapeChecker<M: ExecutionMode> {
+    _mode: PhantomData<M>,
     program_len: u64,
     trace_area: u64,
     max_height: u64,
@@ -48,13 +52,8 @@ pub struct ShapeChecker {
     shard_distinct_instructions: HashSet<u32>,
 }
 
-impl ShapeChecker {
-    pub fn new(
-        program_len: u64,
-        shard_start_clk: u64,
-        elem_threshold: ShardingThreshold,
-        enable_untrusted_programs: bool,
-    ) -> Self {
+impl<M: ExecutionMode> ShapeChecker<M> {
+    pub fn new(program_len: u64, shard_start_clk: u64, elem_threshold: ShardingThreshold) -> Self {
         let costs: HashMap<String, usize> =
             serde_json::from_str(include_str!("../artifacts/rv64im_costs.json")).unwrap();
         let costs: EnumMap<RiscvAirId, u64> =
@@ -71,7 +70,7 @@ impl ShapeChecker {
         );
 
         Self {
-            enable_untrusted_programs,
+            _mode: PhantomData,
             program_len,
             trace_area: preprocessed_trace_area + MAXIMUM_PADDING_AREA + MAXIMUM_CYCLE_AREA,
             max_height: 0,
@@ -118,6 +117,11 @@ impl ShapeChecker {
     }
 
     #[inline]
+    pub fn local_mem_syscall_rr(&mut self) {
+        self.local_mem_counts += self.syscall_sent as u64;
+    }
+
+    #[inline]
     pub fn handle_page_prot_event(&mut self, page_idx: u64, clk: u64) {
         let is_external = self.syscall_sent;
         let is_first_read_this_shard = self.shard_start_clk > clk;
@@ -135,8 +139,29 @@ impl ShapeChecker {
     }
 
     #[inline]
+    pub fn handle_trap_exec_event(&mut self) {
+        self.trace_area += self.costs[RiscvAirId::TrapExec];
+        self.heights[RiscvAirId::TrapExec] += 1;
+        self.max_height = self.max_height.max(self.heights[RiscvAirId::TrapExec]);
+    }
+
+    #[inline]
+    pub fn handle_trap_mem_event(&mut self) {
+        self.trace_area += self.costs[RiscvAirId::TrapMem];
+        self.heights[RiscvAirId::TrapMem] += 1;
+        self.max_height = self.max_height.max(self.heights[RiscvAirId::TrapMem]);
+    }
+
+    #[inline]
+    pub fn increment_count(&mut self, riscv_air_id: RiscvAirId) {
+        self.heights[riscv_air_id] += 1;
+        self.max_height = self.max_height.max(self.heights[riscv_air_id]);
+        self.trace_area += self.costs[riscv_air_id];
+    }
+
+    #[inline]
     pub fn handle_retained_syscall(&mut self, syscall_code: SyscallCode) {
-        let syscall_air_id = if self.enable_untrusted_programs {
+        let syscall_air_id = if M::PAGE_PROTECTION_ENABLED {
             syscall_code.as_air_id_user().unwrap()
         } else {
             syscall_code.as_air_id().unwrap()
@@ -151,80 +176,14 @@ impl ShapeChecker {
         // Currently, all precompiles with `rows_per_event > 1` have the respective control chip.
         if rows_per_event > 1 {
             self.trace_area += self.costs[syscall_air_id
-                .control_air_id(self.enable_untrusted_programs)
+                .control_air_id(M::PAGE_PROTECTION_ENABLED)
                 .expect("Controls AIRs are found for each precompile with rows_per_event > 1")];
         }
     }
 
-    #[inline]
-    pub fn syscall_sent(&mut self) {
-        self.syscall_sent = true;
-    }
-
-    /// Set the start clock of the shard.
-    #[inline]
-    pub fn reset(&mut self, clk: u64) {
-        *self = Self::new(
-            self.program_len,
-            clk,
-            self.sharding_threshold,
-            self.enable_untrusted_programs,
-        );
-    }
-
-    /// Check if the shard limit has been reached.
-    ///
-    /// # Returns
-    ///
-    /// Whether the shard limit has been reached.
-    #[inline]
-    pub fn check_shard_limit(&self) -> bool {
-        !self.is_commit_on
-            && (self.trace_area >= self.sharding_threshold.element_threshold
-                || self.max_height >= self.sharding_threshold.height_threshold)
-    }
-
-    /// Increment the trace area for the given instruction.
-    ///
-    /// # Arguments
-    ///
-    /// * `instruction`: The instruction that is being handled.
-    /// * `syscall_sent`: Whether a syscall was sent during this cycle.
-    /// * `bump_clk_high`: Whether the clk's top 24 bits incremented during this cycle.
-    /// * `is_load_x0`: Whether the instruction is a load of x0, if so the riscv air id is `LoadX0`.
-    ///
-    /// # Returns
-    ///
-    /// Whether the shard limit has been reached.
-    #[allow(clippy::fn_params_excessive_bools)]
-    pub fn handle_instruction(
-        &mut self,
-        instruction: &Instruction,
-        bump_clk_high: bool,
-        is_load_x0: bool,
-        needs_state_bump: bool,
-        num_page_prot_accesses: usize,
-    ) {
+    fn update_heights_and_area(&mut self, bump_clk_high: bool, needs_state_bump: bool) {
         let touched_addresses: u64 = std::mem::take(&mut self.local_mem_counts);
-        let touched_pages: u64 = std::mem::take(&mut self.local_page_prot_counts);
         let syscall_sent = std::mem::take(&mut self.syscall_sent);
-
-        let riscv_air_id = if self.enable_untrusted_programs {
-            if is_load_x0 {
-                RiscvAirId::LoadX0User
-            } else {
-                riscv_air_id_from_opcode_user(instruction.opcode)
-            }
-        } else if is_load_x0 {
-            RiscvAirId::LoadX0
-        } else {
-            riscv_air_id_from_opcode(instruction.opcode)
-        };
-
-        // Increment the height and trace area for the riscv air id
-        self.heights[riscv_air_id] += 1;
-        self.max_height = self.max_height.max(self.heights[riscv_air_id]);
-        self.trace_area += self.costs[riscv_air_id];
 
         // Increment for each touched address in memory local
         self.trace_area += touched_addresses * self.costs[RiscvAirId::MemoryLocal];
@@ -232,10 +191,9 @@ impl ShapeChecker {
         self.max_height = self.max_height.max(self.heights[RiscvAirId::MemoryLocal]);
 
         // Increment for all the global interactions
-        self.trace_area += self.costs[RiscvAirId::Global]
-            * (2 * touched_addresses + 2 * touched_pages + syscall_sent as u64);
-        self.heights[RiscvAirId::Global] +=
-            2 * touched_addresses + 2 * touched_pages + syscall_sent as u64;
+        self.trace_area +=
+            self.costs[RiscvAirId::Global] * (2 * touched_addresses + syscall_sent as u64);
+        self.heights[RiscvAirId::Global] += 2 * touched_addresses + syscall_sent as u64;
         self.max_height = self.max_height.max(self.heights[RiscvAirId::Global]);
 
         // Increment by if bump_clk_high is needed
@@ -259,6 +217,107 @@ impl ShapeChecker {
             self.heights[RiscvAirId::SyscallCore] += 1;
             self.max_height = self.max_height.max(self.heights[RiscvAirId::SyscallCore]);
         }
+    }
+
+    #[inline]
+    pub fn syscall_sent(&mut self) {
+        self.syscall_sent = true;
+    }
+
+    #[inline]
+    pub fn get_syscall_sent(&self) -> bool {
+        self.syscall_sent
+    }
+
+    #[inline]
+    pub fn set_syscall_sent(&mut self, syscall_sent: bool) {
+        self.syscall_sent = syscall_sent;
+    }
+
+    /// Set the start clock of the shard.
+    #[inline]
+    pub fn reset(&mut self, clk: u64) {
+        *self = Self::new(self.program_len, clk, self.sharding_threshold);
+    }
+
+    /// Check if the shard limit has been reached.
+    ///
+    /// # Returns
+    ///
+    /// Whether the shard limit has been reached.
+    #[inline]
+    pub fn check_shard_limit(&self) -> bool {
+        self.trace_area >= self.sharding_threshold.element_threshold
+            || self.max_height >= self.sharding_threshold.height_threshold
+    }
+}
+
+impl ShapeChecker<SupervisorMode> {
+    /// Increment the trace area for the given instruction.
+    ///
+    /// # Arguments
+    ///
+    /// * `instruction`: The instruction that is being handled.
+    /// * `syscall_sent`: Whether a syscall was sent during this cycle.
+    /// * `bump_clk_high`: Whether the clk's top 24 bits incremented during this cycle.
+    /// * `is_load_x0`: Whether the instruction is a load of x0, if so the riscv air id is `LoadX0`.
+    ///
+    /// # Returns
+    ///
+    /// Whether the shard limit has been reached.
+    #[allow(clippy::fn_params_excessive_bools)]
+    pub fn handle_instruction(
+        &mut self,
+        instruction: &Instruction,
+        bump_clk_high: bool,
+        is_load_x0: bool,
+        needs_state_bump: bool,
+    ) {
+        let riscv_air_id = if is_load_x0 {
+            RiscvAirId::LoadX0
+        } else {
+            riscv_air_id_from_opcode(instruction.opcode)
+        };
+
+        self.increment_count(riscv_air_id);
+        self.update_heights_and_area(bump_clk_high, needs_state_bump);
+    }
+}
+
+impl ShapeChecker<UserMode> {
+    /// Increment the trace area for the given instruction.
+    /// Refer to the documentation in `ShapeChecker<SupervisorMode>`.
+    #[allow(clippy::fn_params_excessive_bools)]
+    pub fn handle_instruction(
+        &mut self,
+        instruction: &Instruction,
+        bump_clk_high: bool,
+        is_load_x0: bool,
+        needs_state_bump: bool,
+        num_page_prot_accesses: usize,
+    ) {
+        let riscv_air_id = if is_load_x0 {
+            RiscvAirId::LoadX0User
+        } else {
+            riscv_air_id_from_opcode_user(instruction.opcode)
+        };
+
+        self.increment_count(riscv_air_id);
+        self.update_heights_and_area(bump_clk_high, needs_state_bump);
+        self.update_heights_and_area_prot(num_page_prot_accesses);
+    }
+
+    #[inline]
+    pub fn handle_trap_events(&mut self, bump_clk_high: bool, num_page_prot_accesses: usize) {
+        self.update_heights_and_area(bump_clk_high, bump_clk_high);
+        self.update_heights_and_area_prot(num_page_prot_accesses);
+    }
+
+    fn update_heights_and_area_prot(&mut self, num_page_prot_accesses: usize) {
+        let touched_pages: u64 = std::mem::take(&mut self.local_page_prot_counts);
+        self.trace_area += self.costs[RiscvAirId::Global] * 2 * touched_pages;
+        self.heights[RiscvAirId::Global] += 2 * touched_pages;
+        self.max_height = self.max_height.max(self.heights[RiscvAirId::Global]);
 
         // Increment for each page prot access
         let prev_count = self.heights[RiscvAirId::PageProt];
@@ -276,6 +335,17 @@ impl ShapeChecker {
         self.heights[RiscvAirId::PageProtLocal] += touched_pages;
         self.max_height = self.max_height.max(self.heights[RiscvAirId::PageProtLocal]);
     }
+}
+
+#[inline]
+pub fn riscv_air_id_from_opcode_flag(
+    opcode: Opcode,
+    enable_untrusted_programs: bool,
+) -> RiscvAirId {
+    if enable_untrusted_programs {
+        return riscv_air_id_from_opcode_user(opcode);
+    }
+    riscv_air_id_from_opcode(opcode)
 }
 
 #[inline]
@@ -360,7 +430,7 @@ pub fn riscv_air_id_from_opcode_user(opcode: Opcode) -> RiscvAirId {
         Opcode::AUIPC | Opcode::LUI => RiscvAirId::UTypeUser,
         Opcode::JAL => RiscvAirId::JalUser,
         Opcode::JALR => RiscvAirId::JalrUser,
-        Opcode::ECALL => RiscvAirId::SyscallInstrs,
+        Opcode::ECALL => RiscvAirId::SyscallInstrsUser,
         _ => {
             eprintln!("Unknown opcode: {opcode:?}");
             unreachable!()

@@ -36,4 +36,20 @@ async fn main() {
             println!("  {:?}: {}", syscall_code, count);
         }
     }
+
+    // Setup the proving key
+    println!("Setting up proving key...");
+    let pk = client.setup(ELF).await.expect("Failed to setup proving key");
+
+    // Generate the proof
+    println!("Generating proof...");
+    let proof = client.prove(&pk, stdin.clone()).core().await.expect("Failed to generate proof");
+
+    println!("Proof generated successfully!");
+
+    // Verify the proof
+    println!("Verifying proof...");
+    client.verify(&proof, pk.verifying_key(), None).expect("Failed to verify proof");
+
+    println!("Proof verified successfully!");
 }

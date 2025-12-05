@@ -193,17 +193,9 @@ impl<F: PrimeField32, P: FpOpField, M: TrustMode> MachineAir<F> for Fp2AddSubAss
                 event.op,
             );
 
-            // Populate the memory access columns.
-            for i in 0..cols.y_access.len() {
-                let record = MemoryRecordEnum::Read(event.y_memory_records[i]);
-                cols.y_access[i].populate(record, &mut new_byte_lookup_events);
-                cols.y_addrs[i].populate(&mut new_byte_lookup_events, event.y_ptr, i as u64 * 8);
-            }
-            for i in 0..cols.x_access.len() {
-                let record = MemoryRecordEnum::Write(event.x_memory_records[i]);
-                cols.x_access[i].populate(record, &mut new_byte_lookup_events);
-                cols.x_addrs[i].populate(&mut new_byte_lookup_events, event.x_ptr, i as u64 * 8);
-            }
+            let mut is_not_trap = true;
+            let mut trap_code = 0u8;
+
             if !M::IS_TRUSTED {
                 let cols: &mut Fp2AddSubAssignCols<F, P, UserMode> = row.borrow_mut();
                 cols.read_slice_page_prot_access.populate(
@@ -212,9 +204,9 @@ impl<F: PrimeField32, P: FpOpField, M: TrustMode> MachineAir<F> for Fp2AddSubAss
                     event.y_ptr + 8 * (cols.y_addrs.len() - 1) as u64,
                     event.clk,
                     PROT_READ,
-                    &event.page_prot_records.read_page_prot_records[0],
-                    &event.page_prot_records.read_page_prot_records.get(1).copied(),
-                    input.public_values.is_untrusted_programs_enabled,
+                    &event.page_prot_records.read_page_prot_records,
+                    &mut is_not_trap,
+                    &mut trap_code,
                 );
 
                 cols.write_slice_page_prot_access.populate(
@@ -223,10 +215,36 @@ impl<F: PrimeField32, P: FpOpField, M: TrustMode> MachineAir<F> for Fp2AddSubAss
                     event.x_ptr + 8 * (cols.x_addrs.len() - 1) as u64,
                     event.clk + 1,
                     PROT_READ | PROT_WRITE,
-                    &event.page_prot_records.write_page_prot_records[0],
-                    &event.page_prot_records.write_page_prot_records.get(1).copied(),
-                    input.public_values.is_untrusted_programs_enabled,
+                    &event.page_prot_records.write_page_prot_records,
+                    &mut is_not_trap,
+                    &mut trap_code,
                 );
+            }
+
+            // Populate the memory access columns.
+            let cols: &mut Fp2AddSubAssignCols<F, P, M> = row.borrow_mut();
+            for i in 0..cols.y_addrs.len() {
+                cols.y_addrs[i].populate(&mut new_byte_lookup_events, event.y_ptr, i as u64 * 8);
+            }
+            for i in 0..cols.x_addrs.len() {
+                cols.x_addrs[i].populate(&mut new_byte_lookup_events, event.x_ptr, i as u64 * 8);
+            }
+            if is_not_trap {
+                for i in 0..cols.y_access.len() {
+                    let record = MemoryRecordEnum::Read(event.y_memory_records[i]);
+                    cols.y_access[i].populate(record, &mut new_byte_lookup_events);
+                }
+                for i in 0..cols.x_access.len() {
+                    let record = MemoryRecordEnum::Write(event.x_memory_records[i]);
+                    cols.x_access[i].populate(record, &mut new_byte_lookup_events);
+                }
+            } else {
+                for i in 0..cols.y_access.len() {
+                    cols.y_access[i] = MemoryAccessColsU8::default();
+                }
+                for i in 0..cols.x_access.len() {
+                    cols.x_access[i] = MemoryAccessColsU8::default();
+                }
             }
         });
 
@@ -304,22 +322,54 @@ where
         // Constrain the `is_add` flag to be boolean.
         builder.assert_bool(local.is_add);
 
+        let mut is_not_trap = local.is_real.into();
+        let mut trap_code = AB::Expr::zero();
+
+        if !M::IS_TRUSTED {
+            let local = main.row_slice(0);
+            let local: &Fp2AddSubAssignCols<AB::Var, P, UserMode> = (*local).borrow();
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into(),
+                &local.y_ptr.addr.map(Into::into),
+                &local.y_addrs[local.y_addrs.len() - 1].value.map(Into::into),
+                PROT_READ,
+                &local.read_slice_page_prot_access,
+                &mut is_not_trap,
+                &mut trap_code,
+            );
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into() + AB::Expr::one(),
+                &local.x_ptr.addr.map(Into::into),
+                &local.x_addrs[local.x_addrs.len() - 1].value.map(Into::into),
+                PROT_READ | PROT_WRITE,
+                &local.write_slice_page_prot_access,
+                &mut is_not_trap,
+                &mut trap_code,
+            );
+        }
+
         let num_words_field_element = <P as NumLimbs>::Limbs::USIZE / 8;
 
         let p_x_limbs = builder
-            .generate_limbs(&local.x_access[0..num_words_field_element], local.is_real.into());
+            .generate_limbs(&local.x_access[0..num_words_field_element], is_not_trap.clone());
         let p_x: Limbs<AB::Expr, <P as NumLimbs>::Limbs> =
             Limbs(p_x_limbs.try_into().expect("failed to convert limbs"));
         let q_x_limbs = builder
-            .generate_limbs(&local.y_access[0..num_words_field_element], local.is_real.into());
+            .generate_limbs(&local.y_access[0..num_words_field_element], is_not_trap.clone());
         let q_x: Limbs<AB::Expr, <P as NumLimbs>::Limbs> =
             Limbs(q_x_limbs.try_into().expect("failed to convert limbs"));
-        let p_y_limbs = builder
-            .generate_limbs(&local.x_access[num_words_field_element..], local.is_real.into());
+        let p_y_limbs =
+            builder.generate_limbs(&local.x_access[num_words_field_element..], is_not_trap.clone());
         let p_y: Limbs<AB::Expr, <P as NumLimbs>::Limbs> =
             Limbs(p_y_limbs.try_into().expect("failed to convert limbs"));
-        let q_y_limbs = builder
-            .generate_limbs(&local.y_access[num_words_field_element..], local.is_real.into());
+        let q_y_limbs =
+            builder.generate_limbs(&local.y_access[num_words_field_element..], is_not_trap.clone());
         let q_y: Limbs<AB::Expr, <P as NumLimbs>::Limbs> =
             Limbs(q_y_limbs.try_into().expect("failed to convert limbs"));
 
@@ -401,7 +451,7 @@ where
             local.clk_low,
             &local.y_addrs.iter().map(|addr| addr.value.map(Into::into)).collect_vec(),
             &local.y_access.iter().map(|access| access.memory_access).collect_vec(),
-            local.is_real,
+            is_not_trap.clone(),
         );
 
         // We read p at +1 since p, q could be the same.
@@ -411,7 +461,7 @@ where
             &local.x_addrs.iter().map(|addr| addr.value.map(Into::into)).collect_vec(),
             &local.x_access.iter().map(|access| access.memory_access).collect_vec(),
             result_words,
-            local.is_real,
+            is_not_trap.clone(),
         );
 
         let (add_syscall_id, sub_syscall_id) = match P::FIELD_TYPE {
@@ -432,6 +482,7 @@ where
             local.clk_high,
             local.clk_low,
             syscall_id_felt,
+            trap_code.clone(),
             x_ptr.map(Into::into),
             y_ptr.map(Into::into),
             local.is_real,
@@ -442,32 +493,5 @@ where
             builder.extract_public_values().is_untrusted_programs_enabled,
             AB::Expr::from_bool(!M::IS_TRUSTED),
         );
-
-        if !M::IS_TRUSTED {
-            let local = main.row_slice(0);
-            let local: &Fp2AddSubAssignCols<AB::Var, P, UserMode> = (*local).borrow();
-
-            AddressSlicePageProtOperation::<AB::F>::eval(
-                builder,
-                local.clk_high.into(),
-                local.clk_low.into(),
-                &local.y_ptr.addr.map(Into::into),
-                &local.y_addrs[local.y_addrs.len() - 1].value.map(Into::into),
-                AB::Expr::from_canonical_u8(PROT_READ),
-                &local.read_slice_page_prot_access,
-                local.is_real.into(),
-            );
-
-            AddressSlicePageProtOperation::<AB::F>::eval(
-                builder,
-                local.clk_high.into(),
-                local.clk_low.into() + AB::Expr::one(),
-                &local.x_ptr.addr.map(Into::into),
-                &local.x_addrs[local.x_addrs.len() - 1].value.map(Into::into),
-                AB::Expr::from_canonical_u8(PROT_READ | PROT_WRITE),
-                &local.write_slice_page_prot_access,
-                local.is_real.into(),
-            );
-        }
     }
 }

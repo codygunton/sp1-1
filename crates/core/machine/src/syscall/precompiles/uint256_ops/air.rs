@@ -153,17 +153,6 @@ where
             + AB::Expr::from_canonical_u32(SyscallCode::UINT256_MUL_CARRY.syscall_id())
                 * local.is_mul;
 
-        // Receive the arguments.
-        builder.receive_syscall(
-            local.clk_high,
-            local.clk_low,
-            syscall_id,
-            a_ptr.map(Into::into),
-            b_ptr.map(Into::into),
-            local.is_real,
-            InteractionScope::Local,
-        );
-
         builder.eval_memory_access_read(
             local.clk_high,
             local.clk_low.into(),
@@ -238,35 +227,116 @@ where
             );
         }
 
+        let mut is_not_trap = local.is_real.into();
+        let mut trap_code = AB::Expr::zero();
+
+        // Evaluate the page prot accesses only for user mode.
+        if !M::IS_TRUSTED {
+            let local = main.row_slice(0);
+            let local: &Uint256OpsCols<AB::Var, UserMode> = (*local).borrow();
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into(),
+                &a_ptr.map(Into::into),
+                &local.a_addrs[WORDS_FIELD_ELEMENT - 1].value.map(Into::into),
+                PROT_READ,
+                &local.address_slice_page_prot_access_a,
+                &mut is_not_trap,
+                &mut trap_code,
+            );
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into() + AB::Expr::one(),
+                &b_ptr.map(Into::into),
+                &local.b_addrs[WORDS_FIELD_ELEMENT - 1].value.map(Into::into),
+                PROT_READ,
+                &local.address_slice_page_prot_access_b,
+                &mut is_not_trap,
+                &mut trap_code,
+            );
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into() + AB::Expr::from_canonical_u8(2),
+                &c_ptr.map(Into::into),
+                &local.c_addrs[WORDS_FIELD_ELEMENT - 1].value.map(Into::into),
+                PROT_READ,
+                &local.address_slice_page_prot_access_c,
+                &mut is_not_trap,
+                &mut trap_code,
+            );
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into() + AB::Expr::from_canonical_u8(3),
+                &d_ptr.map(Into::into),
+                &local.d_addrs[WORDS_FIELD_ELEMENT - 1].value.map(Into::into),
+                PROT_WRITE,
+                &local.address_slice_page_prot_access_d,
+                &mut is_not_trap,
+                &mut trap_code,
+            );
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into() + AB::Expr::from_canonical_u8(4),
+                &e_ptr.map(Into::into),
+                &local.e_addrs[WORDS_FIELD_ELEMENT - 1].value.map(Into::into),
+                PROT_WRITE,
+                &local.address_slice_page_prot_access_e,
+                &mut is_not_trap,
+                &mut trap_code,
+            );
+        }
+
+        // Receive the arguments.
+        builder.receive_syscall(
+            local.clk_high,
+            local.clk_low,
+            syscall_id,
+            trap_code.clone(),
+            a_ptr.map(Into::into),
+            b_ptr.map(Into::into),
+            local.is_real,
+            InteractionScope::Local,
+        );
+
         builder.eval_memory_access_slice_read(
             local.clk_high,
             local.clk_low.into(),
             &local.a_addrs.map(|addr| addr.value.map(Into::into)),
             &local.a_memory.iter().map(|access| access.memory_access).collect_vec(),
-            local.is_real,
+            is_not_trap.clone(),
         );
         builder.eval_memory_access_slice_read(
             local.clk_high,
             local.clk_low.into() + AB::Expr::one(),
             &local.b_addrs.map(|addr| addr.value.map(Into::into)),
             &local.b_memory.iter().map(|access| access.memory_access).collect_vec(),
-            local.is_real,
+            is_not_trap.clone(),
         );
         builder.eval_memory_access_slice_read(
             local.clk_high,
             local.clk_low.into() + AB::Expr::from_canonical_u8(2),
             &local.c_addrs.map(|addr| addr.value.map(Into::into)),
             &local.c_memory.iter().map(|access| access.memory_access).collect_vec(),
-            local.is_real,
+            is_not_trap.clone(),
         );
 
-        let a_limbs_vec = builder.generate_limbs(&local.a_memory, local.is_real.into());
+        let a_limbs_vec = builder.generate_limbs(&local.a_memory, is_not_trap.clone());
         let a_limbs: Limbs<AB::Expr, <U256Field as NumLimbs>::Limbs> =
             Limbs(a_limbs_vec.try_into().expect("failed to convert limbs"));
-        let b_limbs_vec = builder.generate_limbs(&local.b_memory, local.is_real.into());
+        let b_limbs_vec = builder.generate_limbs(&local.b_memory, is_not_trap.clone());
         let b_limbs: Limbs<AB::Expr, <U256Field as NumLimbs>::Limbs> =
             Limbs(b_limbs_vec.try_into().expect("failed to convert limbs"));
-        let c_limbs_vec = builder.generate_limbs(&local.c_memory, local.is_real.into());
+        let c_limbs_vec = builder.generate_limbs(&local.c_memory, is_not_trap.clone());
         let c_limbs: Limbs<AB::Expr, <U256Field as NumLimbs>::Limbs> =
             Limbs(c_limbs_vec.try_into().expect("failed to convert limbs"));
 
@@ -293,7 +363,7 @@ where
             &local.d_addrs.map(|addr| addr.value.map(Into::into)),
             &local.d_memory,
             d_result,
-            local.is_real,
+            is_not_trap.clone(),
         );
 
         let e_result = limbs_to_words::<AB>(local.field_op.carry.0.to_vec());
@@ -303,73 +373,12 @@ where
             &local.e_addrs.map(|addr| addr.value.map(Into::into)),
             &local.e_memory,
             e_result,
-            local.is_real,
+            is_not_trap.clone(),
         );
 
         builder.assert_eq(
             builder.extract_public_values().is_untrusted_programs_enabled,
             AB::Expr::from_bool(!M::IS_TRUSTED),
         );
-
-        // Evaluate the page prot accesses only for user mode.
-        if !M::IS_TRUSTED {
-            let local = main.row_slice(0);
-            let local: &Uint256OpsCols<AB::Var, UserMode> = (*local).borrow();
-
-            AddressSlicePageProtOperation::<AB::F>::eval(
-                builder,
-                local.clk_high.into(),
-                local.clk_low.into(),
-                &a_ptr.map(Into::into),
-                &local.a_addrs[WORDS_FIELD_ELEMENT - 1].value.map(Into::into),
-                AB::Expr::from_canonical_u8(PROT_READ),
-                &local.address_slice_page_prot_access_a,
-                local.is_real.into(),
-            );
-
-            AddressSlicePageProtOperation::<AB::F>::eval(
-                builder,
-                local.clk_high.into(),
-                local.clk_low.into() + AB::Expr::one(),
-                &b_ptr.map(Into::into),
-                &local.b_addrs[WORDS_FIELD_ELEMENT - 1].value.map(Into::into),
-                AB::Expr::from_canonical_u8(PROT_READ),
-                &local.address_slice_page_prot_access_b,
-                local.is_real.into(),
-            );
-
-            AddressSlicePageProtOperation::<AB::F>::eval(
-                builder,
-                local.clk_high.into(),
-                local.clk_low.into() + AB::Expr::from_canonical_u8(2),
-                &c_ptr.map(Into::into),
-                &local.c_addrs[WORDS_FIELD_ELEMENT - 1].value.map(Into::into),
-                AB::Expr::from_canonical_u8(PROT_READ),
-                &local.address_slice_page_prot_access_c,
-                local.is_real.into(),
-            );
-
-            AddressSlicePageProtOperation::<AB::F>::eval(
-                builder,
-                local.clk_high.into(),
-                local.clk_low.into() + AB::Expr::from_canonical_u8(3),
-                &d_ptr.map(Into::into),
-                &local.d_addrs[WORDS_FIELD_ELEMENT - 1].value.map(Into::into),
-                AB::Expr::from_canonical_u8(PROT_WRITE),
-                &local.address_slice_page_prot_access_d,
-                local.is_real.into(),
-            );
-
-            AddressSlicePageProtOperation::<AB::F>::eval(
-                builder,
-                local.clk_high.into(),
-                local.clk_low.into() + AB::Expr::from_canonical_u8(4),
-                &e_ptr.map(Into::into),
-                &local.e_addrs[WORDS_FIELD_ELEMENT - 1].value.map(Into::into),
-                AB::Expr::from_canonical_u8(PROT_WRITE),
-                &local.address_slice_page_prot_access_e,
-                local.is_real.into(),
-            );
-        }
     }
 }

@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 
 use crate::{
     adapter::bump::StateBumpChip,
-    control_flow::{BranchChip, JalChip, JalrChip},
+    control_flow::{BranchChip, JalChip, JalrChip, TrapExecChip, TrapMemChip},
     global::GlobalChip,
     memory::{
         load::{
@@ -25,7 +25,10 @@ use crate::{
     range::RangeChip,
     syscall::{
         instructions::SyscallInstrsChip,
-        precompiles::fptower::{Fp2AddSubAssignChip, Fp2MulAssignChip, FpOpChip},
+        precompiles::{
+            fptower::{Fp2AddSubAssignChip, Fp2MulAssignChip, FpOpChip},
+            sigreturn::SigReturnChip,
+        },
     },
     utype::UTypeChip,
     SupervisorMode, UserMode,
@@ -190,7 +193,13 @@ pub enum RiscvAir<F: PrimeField32> {
     /// An AIR for RISC-V jalr instructions (User mode).
     JalrUser(JalrChip<UserMode>),
     /// An AIR for RISC-V ecall instructions.
-    SyscallInstrs(SyscallInstrsChip),
+    SyscallInstrs(SyscallInstrsChip<SupervisorMode>),
+    /// An AIR for RISC-V ecall instructions (User mode).
+    SyscallInstrsUser(SyscallInstrsChip<UserMode>),
+    /// An AIR for traps due to untrusted instruction not having correct permission.
+    TrapExec(TrapExecChip),
+    /// An AIR for traps due to load, store operations not having correct permission,
+    TrapMem(TrapMemChip),
     /// A lookup table for byte operations.
     ByteLookup(ByteChip<F>),
     /// A lookup table for range operations.
@@ -326,6 +335,8 @@ pub enum RiscvAir<F: PrimeField32> {
     Bn254Fp2AddSubUser(Fp2AddSubAssignChip<Bn254BaseField, UserMode>),
     /// A precompile for mprotect syscalls.
     Mprotect(MProtectChip),
+    /// A precompile for sigreturn syscall.
+    SigReturn(SigReturnChip),
     /// A precompile for Poseidon2 permutation.
     Poseidon2(Poseidon2Chip<SupervisorMode>),
     Poseidon2User(Poseidon2Chip<UserMode>),
@@ -472,6 +483,7 @@ impl<F: PrimeField32> RiscvAir<F> {
                 UserMode,
             >::with_lexicographic_rule()),
             RiscvAir::Mprotect(MProtectChip::default()),
+            RiscvAir::SigReturn(SigReturnChip::default()),
             RiscvAir::Poseidon2(Poseidon2Chip::<SupervisorMode>::new()),
             RiscvAir::Poseidon2User(Poseidon2Chip::<UserMode>::new()),
             RiscvAir::SyscallCore(SyscallChip::core()),
@@ -526,7 +538,10 @@ impl<F: PrimeField32> RiscvAir<F> {
             RiscvAir::JalrUser(JalrChip::<UserMode>::default()),
             RiscvAir::InstructionDecode(InstructionDecodeChip::default()),
             RiscvAir::InstructionFetch(InstructionFetchChip::default()),
-            RiscvAir::SyscallInstrs(SyscallInstrsChip::default()),
+            RiscvAir::SyscallInstrs(SyscallInstrsChip::<SupervisorMode>::default()),
+            RiscvAir::SyscallInstrsUser(SyscallInstrsChip::<UserMode>::default()),
+            RiscvAir::TrapExec(TrapExecChip::default()),
+            RiscvAir::TrapMem(TrapMemChip::default()),
             RiscvAir::MemoryBump(MemoryBumpChip::new()),
             RiscvAir::PageProt(PageProtChip::default()),
             RiscvAir::PageProtLocal(PageProtLocalChip::default()),
@@ -632,6 +647,7 @@ impl<F: PrimeField32> RiscvAir<F> {
             [Bn254Fp2MulUser].as_slice(),
             [Poseidon2User].as_slice(),
             [Mprotect].as_slice(),
+            [SigReturn].as_slice(),
         ]
         .into_iter()
         .map(|ids| extend_base(&base_precompile_cluster_user, ids.iter().cloned()));
@@ -700,7 +716,9 @@ impl<F: PrimeField32> RiscvAir<F> {
                 BranchUser,
                 JalUser,
                 JalrUser,
-                SyscallInstrs,
+                SyscallInstrsUser,
+                TrapExec,
+                TrapMem,
                 MemoryBump,
                 StateBump,
                 MemoryLocal,
@@ -1199,6 +1217,10 @@ impl<F: PrimeField32> RiscvAir<F> {
         costs.insert(mprotect.name().to_string(), mprotect.cost());
         chips.push(mprotect);
 
+        let sig_return = Chip::new(RiscvAir::SigReturn(SigReturnChip::default()));
+        costs.insert(sig_return.name().to_string(), sig_return.cost());
+        chips.push(sig_return);
+
         let syscall_core = Chip::new(RiscvAir::SyscallCore(SyscallChip::core()));
         costs.insert(syscall_core.name().to_string(), syscall_core.cost());
         chips.push(syscall_core);
@@ -1405,9 +1427,23 @@ impl<F: PrimeField32> RiscvAir<F> {
         costs.insert(jalr.name().to_string(), jalr.cost());
         chips.push(jalr);
 
-        let syscall_instrs = Chip::new(RiscvAir::SyscallInstrs(SyscallInstrsChip::default()));
+        let syscall_instrs =
+            Chip::new(RiscvAir::SyscallInstrs(SyscallInstrsChip::<SupervisorMode>::default()));
         costs.insert(syscall_instrs.name().to_string(), syscall_instrs.cost());
         chips.push(syscall_instrs);
+
+        let syscall_instrs =
+            Chip::new(RiscvAir::SyscallInstrsUser(SyscallInstrsChip::<UserMode>::default()));
+        costs.insert(syscall_instrs.name().to_string(), syscall_instrs.cost());
+        chips.push(syscall_instrs);
+
+        let trap_exec = Chip::new(RiscvAir::TrapExec(TrapExecChip::default()));
+        costs.insert(trap_exec.name().to_string(), trap_exec.cost());
+        chips.push(trap_exec);
+
+        let trap_mem = Chip::new(RiscvAir::TrapMem(TrapMemChip::default()));
+        costs.insert(trap_mem.name().to_string(), trap_mem.cost());
+        chips.push(trap_mem);
 
         let memory_bump = Chip::new(RiscvAir::MemoryBump(MemoryBumpChip::new()));
         costs.insert(memory_bump.name().to_string(), memory_bump.cost());
@@ -1539,7 +1575,7 @@ impl<F: PrimeField32> RiscvAir<F> {
                 (RiscvAirId::JalrUser, record.jalr_events.len()),
                 (RiscvAirId::Global, record.global_interaction_events.len()),
                 (RiscvAirId::SyscallCore, record.syscall_events.len()),
-                (RiscvAirId::SyscallInstrs, record.syscall_events.len()),
+                (RiscvAirId::SyscallInstrsUser, record.syscall_events.len()),
                 (RiscvAirId::InstructionDecode, record.instruction_fetch_events.len()),
                 (RiscvAirId::InstructionFetch, record.instruction_fetch_events.len()),
             ]
@@ -1667,6 +1703,9 @@ impl From<RiscvAirDiscriminants> for RiscvAirId {
             RiscvAirDiscriminants::Jalr => RiscvAirId::Jalr,
             RiscvAirDiscriminants::JalrUser => RiscvAirId::JalrUser,
             RiscvAirDiscriminants::SyscallInstrs => RiscvAirId::SyscallInstrs,
+            RiscvAirDiscriminants::SyscallInstrsUser => RiscvAirId::SyscallInstrsUser,
+            RiscvAirDiscriminants::TrapExec => RiscvAirId::TrapExec,
+            RiscvAirDiscriminants::TrapMem => RiscvAirId::TrapMem,
             RiscvAirDiscriminants::ByteLookup => RiscvAirId::Byte,
             RiscvAirDiscriminants::MemoryGlobalInit => RiscvAirId::MemoryGlobalInit,
             RiscvAirDiscriminants::MemoryGlobalFinal => RiscvAirId::MemoryGlobalFinalize,
@@ -1730,6 +1769,7 @@ impl From<RiscvAirDiscriminants> for RiscvAirId {
             RiscvAirDiscriminants::KeccakPControl => RiscvAirId::KeccakPermuteControl,
             RiscvAirDiscriminants::KeccakPControlUser => RiscvAirId::KeccakPermuteControlUser,
             RiscvAirDiscriminants::Mprotect => RiscvAirId::Mprotect,
+            RiscvAirDiscriminants::SigReturn => RiscvAirId::SigReturn,
             RiscvAirDiscriminants::Poseidon2 => RiscvAirId::Poseidon2,
             RiscvAirDiscriminants::Poseidon2User => RiscvAirId::Poseidon2User,
         }

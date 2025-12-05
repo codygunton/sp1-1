@@ -3,6 +3,7 @@ use sp1_primitives::consts::PAGE_SIZE;
 
 use crate::memory::MAX_LOG_ADDR;
 
+#[allow(clippy::unnecessary_wraps)]
 pub fn mprotect_syscall(
     ctx: &mut impl SyscallContext,
     addr: u64,

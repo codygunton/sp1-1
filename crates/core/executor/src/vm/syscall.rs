@@ -1,9 +1,9 @@
 use crate::{
     events::{
-        MemoryLocalEvent, MemoryReadRecord, MemoryWriteRecord, PageProtLocalEvent, PageProtRecord,
-        PrecompileEvent, SyscallEvent,
+        MemoryAccessPosition, MemoryLocalEvent, MemoryReadRecord, MemoryWriteRecord,
+        PageProtLocalEvent, PageProtRecord, PrecompileEvent, SyscallEvent,
     },
-    ExecutionError, ExecutionRecord, Register, SyscallCode,
+    ExecutionMode, ExecutionRecord, Register, SyscallCode, TrapError, TrapResult,
 };
 use sp1_curves::{
     edwards::ed25519::Ed25519,
@@ -26,20 +26,14 @@ mod commit;
 mod deferred;
 mod halt;
 mod hint;
-mod mprotect;
-mod poseidon2;
 mod precompiles;
-mod sig_return;
-mod u256x2048_mul;
-mod uint256;
-mod uint256_ops;
 
-pub trait SyscallRuntime<'a> {
+pub trait SyscallRuntime<'a, M: ExecutionMode> {
     const TRACING: bool;
 
-    fn core(&self) -> &CoreVM<'a>;
+    fn core(&self) -> &CoreVM<'a, M>;
 
-    fn core_mut(&mut self) -> &mut CoreVM<'a>;
+    fn core_mut(&mut self) -> &mut CoreVM<'a, M>;
 
     #[allow(clippy::too_many_arguments)]
     fn syscall_event(
@@ -48,13 +42,16 @@ pub trait SyscallRuntime<'a> {
         _syscall_code: SyscallCode,
         _arg1: u64,
         _arg2: u64,
-        _op_a_0: bool,
         _next_pc: u64,
         _exit_code: u32,
+        _sig_return_pc_record: Option<MemoryReadRecord>,
+        _trap_result: Option<TrapResult>,
+        _trap_error: Option<TrapError>,
     ) -> SyscallEvent {
         unreachable!("SyscallRuntime::syscall_event is not intended to be called by default.");
     }
 
+    #[allow(clippy::large_types_passed_by_value)]
     fn add_precompile_event(
         &mut self,
         _syscall_code: SyscallCode,
@@ -72,6 +69,10 @@ pub trait SyscallRuntime<'a> {
         let clk = self.core_mut().clk();
 
         self.core_mut().set_clk(clk + 1);
+    }
+
+    fn reset_clk(&mut self, clk: u64) {
+        self.core_mut().set_clk(clk);
     }
 
     fn record_mut(&mut self) -> &mut ExecutionRecord {
@@ -109,7 +110,7 @@ pub trait SyscallRuntime<'a> {
         &mut self,
         addr: u64,
         len: usize,
-    ) -> Result<Vec<PageProtRecord>, ExecutionError> {
+    ) -> (Vec<PageProtRecord>, Option<TrapError>) {
         let first_page_idx = addr >> LOG_PAGE_SIZE;
         let last_page_idx = (addr + (len - 1) as u64 * 8) >> LOG_PAGE_SIZE;
         self.page_prot_range_check(first_page_idx, last_page_idx, PROT_READ)
@@ -120,7 +121,7 @@ pub trait SyscallRuntime<'a> {
         &mut self,
         addr: u64,
         len: usize,
-    ) -> Result<Vec<PageProtRecord>, ExecutionError> {
+    ) -> (Vec<PageProtRecord>, Option<TrapError>) {
         let first_page_idx = addr >> LOG_PAGE_SIZE;
         let last_page_idx = (addr + (len - 1) as u64 * 8) >> LOG_PAGE_SIZE;
         self.page_prot_range_check(first_page_idx, last_page_idx, PROT_WRITE)
@@ -131,7 +132,7 @@ pub trait SyscallRuntime<'a> {
         &mut self,
         addr: u64,
         len: usize,
-    ) -> Result<Vec<PageProtRecord>, ExecutionError> {
+    ) -> (Vec<PageProtRecord>, Option<TrapError>) {
         let first_page_idx = addr >> LOG_PAGE_SIZE;
         let last_page_idx = (addr + (len - 1) as u64 * 8) >> LOG_PAGE_SIZE;
         self.page_prot_range_check(first_page_idx, last_page_idx, PROT_READ | PROT_WRITE)
@@ -144,14 +145,19 @@ pub trait SyscallRuntime<'a> {
         start_page_idx: u64,
         end_page_idx: u64,
         page_prot_bitmap: u8,
-    ) -> Result<Vec<PageProtRecord>, ExecutionError> {
+    ) -> (Vec<PageProtRecord>, Option<TrapError>) {
+        if !M::PAGE_PROTECTION_ENABLED {
+            return (Vec::new(), None);
+        }
         let mut records = Vec::new();
         for page_idx in start_page_idx..=end_page_idx {
-            if let Some(record) = self.page_prot_check(page_idx, page_prot_bitmap)? {
-                records.push(record);
+            let (result, error) = self.page_prot_check(page_idx, page_prot_bitmap);
+            records.push(result.expect("page protection is known to be on at this point"));
+            if error.is_some() {
+                return (records, error);
             }
         }
-        Ok(records)
+        (records, None)
     }
 
     #[inline]
@@ -159,36 +165,42 @@ pub trait SyscallRuntime<'a> {
         &mut self,
         page_idx: u64,
         page_prot_bitmap: u8,
-    ) -> Result<Option<PageProtRecord>, ExecutionError> {
-        if self.core().program.enable_untrusted_programs {
+    ) -> (Option<PageProtRecord>, Option<TrapError>) {
+        if M::PAGE_PROTECTION_ENABLED {
             let mem_writes = self.core_mut().mem_reads();
             let prot_value: PageProtValue =
                 mem_writes.next().expect("Precompile memory read out of bounds").into();
 
-            if (page_prot_bitmap & PROT_EXEC) != 0 && (prot_value.value & PROT_EXEC) == 0 {
-                return Err(ExecutionError::PagePermissionViolation(PROT_FAILURE_EXEC));
-            }
-            if (page_prot_bitmap & PROT_READ) != 0 && (prot_value.value & PROT_READ) == 0 {
-                return Err(ExecutionError::PagePermissionViolation(PROT_FAILURE_READ));
-            }
-            if (page_prot_bitmap & PROT_WRITE) != 0 && (prot_value.value & PROT_WRITE) == 0 {
-                return Err(ExecutionError::PagePermissionViolation(PROT_FAILURE_WRITE));
-            }
-
-            Ok(Some(PageProtRecord {
+            let page_prot_record = Some(PageProtRecord {
                 external_flag: false,
                 page_idx,
                 timestamp: prot_value.timestamp,
                 page_prot: prot_value.value,
-            }))
-        } else {
-            Ok(None)
-        }
-    }
+            });
 
-    #[inline]
-    fn mr(&mut self, addr: u64) -> Result<MemoryReadRecord, ExecutionError> {
-        self.core_mut().mr_instr(addr, PROT_READ, None)
+            if (page_prot_bitmap & PROT_EXEC) != 0 && (prot_value.value & PROT_EXEC) == 0 {
+                return (
+                    page_prot_record,
+                    Some(TrapError::PagePermissionViolation(PROT_FAILURE_EXEC)),
+                );
+            }
+            if (page_prot_bitmap & PROT_READ) != 0 && (prot_value.value & PROT_READ) == 0 {
+                return (
+                    page_prot_record,
+                    Some(TrapError::PagePermissionViolation(PROT_FAILURE_READ)),
+                );
+            }
+            if (page_prot_bitmap & PROT_WRITE) != 0 && (prot_value.value & PROT_WRITE) == 0 {
+                return (
+                    page_prot_record,
+                    Some(TrapError::PagePermissionViolation(PROT_FAILURE_WRITE)),
+                );
+            }
+
+            return (page_prot_record, None);
+        }
+
+        (None, None)
     }
 
     #[inline]
@@ -213,26 +225,6 @@ pub trait SyscallRuntime<'a> {
     }
 
     #[inline]
-    fn mw(&mut self, addr: u64) -> Result<MemoryWriteRecord, ExecutionError> {
-        let prev_page_prot_record = self.page_prot_check(addr >> LOG_PAGE_SIZE, PROT_WRITE)?;
-
-        let mem_writes = self.core_mut().mem_reads();
-
-        let old = mem_writes.next().expect("Precompile memory read out of bounds");
-        let new = mem_writes.next().expect("Precompile memory read out of bounds");
-
-        let record = MemoryWriteRecord {
-            prev_timestamp: old.clk,
-            prev_value: old.value,
-            timestamp: self.core().clk(),
-            value: new.value,
-            prev_page_prot_record,
-        };
-
-        Ok(record)
-    }
-
-    #[inline]
     fn mw_without_prot(&mut self, _addr: u64) -> MemoryWriteRecord {
         let mem_writes = self.core_mut().mem_reads();
 
@@ -251,20 +243,6 @@ pub trait SyscallRuntime<'a> {
     }
 
     #[inline]
-    fn mr_slice(
-        &mut self,
-        addr: u64,
-        len: usize,
-    ) -> Result<(Vec<MemoryReadRecord>, Vec<PageProtRecord>), ExecutionError> {
-        let first_page_idx = addr >> LOG_PAGE_SIZE;
-        let last_page_idx = (addr + (len - 1) as u64 * 8) >> LOG_PAGE_SIZE;
-        let page_prot_records =
-            self.page_prot_range_check(first_page_idx, last_page_idx, PROT_READ)?;
-
-        Ok((self.mr_slice_without_prot(addr, len), page_prot_records))
-    }
-
-    #[inline]
     fn mr_slice_without_prot(&mut self, _addr: u64, len: usize) -> Vec<MemoryReadRecord> {
         let current_clk = self.core().clk();
         let mem_reads = self.core_mut().mem_reads();
@@ -278,20 +256,6 @@ pub trait SyscallRuntime<'a> {
                 prev_page_prot_record: None,
             })
             .collect()
-    }
-
-    #[inline]
-    fn mw_slice(
-        &mut self,
-        addr: u64,
-        len: usize,
-    ) -> Result<(Vec<MemoryWriteRecord>, Vec<PageProtRecord>), ExecutionError> {
-        let first_page_idx = addr >> LOG_PAGE_SIZE;
-        let last_page_idx = (addr + (len - 1) as u64 * 8) >> LOG_PAGE_SIZE;
-        let page_prot_records =
-            self.page_prot_range_check(first_page_idx, last_page_idx, PROT_WRITE)?;
-
-        Ok((self.mw_slice_without_prot(addr, len), page_prot_records))
     }
 
     #[inline]
@@ -326,28 +290,34 @@ pub trait SyscallRuntime<'a> {
     }
 
     fn rr(&mut self, register: usize) -> MemoryReadRecord {
-        self.core_mut().rr(Register::from_u8(register as u8), None)
+        // Memory access position of `0` is `MemoryAccessPosition::UntrustedInstruction`.
+        self.core_mut()
+            .rr(Register::from_u8(register as u8), MemoryAccessPosition::UntrustedInstruction)
+    }
+
+    fn rw(&mut self, register: usize, value: u64) -> MemoryWriteRecord {
+        self.core_mut().rw(Register::from_u8(register as u8), value)
     }
 }
 
-impl<'a> SyscallRuntime<'a> for CoreVM<'a> {
+impl<'a, M: ExecutionMode> SyscallRuntime<'a, M> for CoreVM<'a, M> {
     const TRACING: bool = false;
 
-    fn core(&self) -> &CoreVM<'a> {
+    fn core(&self) -> &CoreVM<'a, M> {
         self
     }
 
-    fn core_mut(&mut self) -> &mut CoreVM<'a> {
+    fn core_mut(&mut self) -> &mut CoreVM<'a, M> {
         self
     }
 }
 
-pub(crate) fn sp1_ecall_handler<'a, RT: SyscallRuntime<'a>>(
+pub(crate) fn sp1_ecall_handler<'a, M: ExecutionMode, RT: SyscallRuntime<'a, M>>(
     rt: &mut RT,
     code: SyscallCode,
     args1: u64,
     args2: u64,
-) -> Result<Option<u64>, ExecutionError> {
+) -> Result<Option<u64>, TrapError> {
     // Precompiles may directly modify the clock, so we need to save the current clock
     // and reset it after the syscall.
     let clk = rt.core().clk();
@@ -364,69 +334,71 @@ pub(crate) fn sp1_ecall_handler<'a, RT: SyscallRuntime<'a>>(
         }
         // Weierstrass curve operations
         SyscallCode::SECP256K1_ADD => {
-            precompiles::weierstrass::weierstrass_add::<_, Secp256k1>(rt, code, args1, args2)
+            precompiles::weierstrass::weierstrass_add::<M, _, Secp256k1>(rt, code, args1, args2)
         }
         SyscallCode::SECP256K1_DOUBLE => {
-            precompiles::weierstrass::weierstrass_double::<_, Secp256k1>(rt, code, args1, args2)
+            precompiles::weierstrass::weierstrass_double::<M, _, Secp256k1>(rt, code, args1, args2)
         }
         SyscallCode::BLS12381_ADD => {
-            precompiles::weierstrass::weierstrass_add::<_, Bls12381>(rt, code, args1, args2)
+            precompiles::weierstrass::weierstrass_add::<M, _, Bls12381>(rt, code, args1, args2)
         }
         SyscallCode::BLS12381_DOUBLE => {
-            precompiles::weierstrass::weierstrass_double::<_, Bls12381>(rt, code, args1, args2)
+            precompiles::weierstrass::weierstrass_double::<M, _, Bls12381>(rt, code, args1, args2)
         }
         SyscallCode::BN254_ADD => {
-            precompiles::weierstrass::weierstrass_add::<_, Bn254>(rt, code, args1, args2)
+            precompiles::weierstrass::weierstrass_add::<M, _, Bn254>(rt, code, args1, args2)
         }
         SyscallCode::BN254_DOUBLE => {
-            precompiles::weierstrass::weierstrass_double::<_, Bn254>(rt, code, args1, args2)
+            precompiles::weierstrass::weierstrass_double::<M, _, Bn254>(rt, code, args1, args2)
         }
         SyscallCode::SECP256R1_ADD => {
-            precompiles::weierstrass::weierstrass_add::<_, Secp256r1>(rt, code, args1, args2)
+            precompiles::weierstrass::weierstrass_add::<M, _, Secp256r1>(rt, code, args1, args2)
         }
         SyscallCode::SECP256R1_DOUBLE => {
-            precompiles::weierstrass::weierstrass_double::<_, Secp256r1>(rt, code, args1, args2)
+            precompiles::weierstrass::weierstrass_double::<M, _, Secp256r1>(rt, code, args1, args2)
         }
         // Edwards curve operations
         SyscallCode::ED_ADD => {
-            precompiles::edwards::edwards_add::<RT, Ed25519>(rt, code, args1, args2)
+            precompiles::edwards::edwards_add::<M, RT, Ed25519>(rt, code, args1, args2)
         }
         SyscallCode::ED_DECOMPRESS => {
             precompiles::edwards::edwards_decompress(rt, code, args1, args2)
         }
-        SyscallCode::UINT256_MUL => uint256::uint256_mul(rt, code, args1, args2),
+        SyscallCode::UINT256_MUL => precompiles::uint256::uint256_mul(rt, code, args1, args2),
         SyscallCode::UINT256_MUL_CARRY | SyscallCode::UINT256_ADD_CARRY => {
-            uint256_ops::uint256_ops(rt, code, args1, args2)
+            precompiles::uint256_ops::uint256_ops(rt, code, args1, args2)
         }
-        SyscallCode::U256XU2048_MUL => u256x2048_mul::u256xu2048_mul(rt, code, args1, args2),
+        SyscallCode::U256XU2048_MUL => {
+            precompiles::u256x2048_mul::u256xu2048_mul(rt, code, args1, args2)
+        }
         SyscallCode::SHA_COMPRESS => precompiles::sha256::sha256_compress(rt, code, args1, args2),
         SyscallCode::SHA_EXTEND => precompiles::sha256::sha256_extend(rt, code, args1, args2),
         SyscallCode::KECCAK_PERMUTE => {
             precompiles::keccak256::keccak256_permute(rt, code, args1, args2)
         }
         SyscallCode::BLS12381_FP2_ADD | SyscallCode::BLS12381_FP2_SUB => {
-            precompiles::fptower::fp2_add::<_, Bls12381BaseField>(rt, code, args1, args2)
+            precompiles::fptower::fp2_add::<M, _, Bls12381BaseField>(rt, code, args1, args2)
         }
         SyscallCode::BN254_FP2_ADD | SyscallCode::BN254_FP2_SUB => {
-            precompiles::fptower::fp2_add::<_, Bn254BaseField>(rt, code, args1, args2)
+            precompiles::fptower::fp2_add::<M, _, Bn254BaseField>(rt, code, args1, args2)
         }
         SyscallCode::BLS12381_FP2_MUL => {
-            precompiles::fptower::fp2_mul::<_, Bls12381BaseField>(rt, code, args1, args2)
+            precompiles::fptower::fp2_mul::<M, _, Bls12381BaseField>(rt, code, args1, args2)
         }
         SyscallCode::BN254_FP2_MUL => {
-            precompiles::fptower::fp2_mul::<_, Bn254BaseField>(rt, code, args1, args2)
+            precompiles::fptower::fp2_mul::<M, _, Bn254BaseField>(rt, code, args1, args2)
         }
         SyscallCode::BLS12381_FP_ADD
         | SyscallCode::BLS12381_FP_SUB
         | SyscallCode::BLS12381_FP_MUL => {
-            precompiles::fptower::fp_op::<_, Bls12381BaseField>(rt, code, args1, args2)
+            precompiles::fptower::fp_op::<M, _, Bls12381BaseField>(rt, code, args1, args2)
         }
         SyscallCode::BN254_FP_ADD | SyscallCode::BN254_FP_SUB | SyscallCode::BN254_FP_MUL => {
-            precompiles::fptower::fp_op::<_, Bn254BaseField>(rt, code, args1, args2)
+            precompiles::fptower::fp_op::<M, _, Bn254BaseField>(rt, code, args1, args2)
         }
-        SyscallCode::MPROTECT => mprotect::mprotect(rt, code, args1, args2),
-        SyscallCode::SIG_RETURN => sig_return::sig_return(rt, code, args1, args2),
-        SyscallCode::POSEIDON2 => poseidon2::poseidon2(rt, code, args1, args2),
+        SyscallCode::MPROTECT => Ok(precompiles::mprotect::mprotect(rt, code, args1, args2)),
+        SyscallCode::SIG_RETURN => Ok(precompiles::sig_return::sig_return(rt, code, args1, args2)),
+        SyscallCode::POSEIDON2 => precompiles::poseidon2::poseidon2(rt, code, args1, args2),
         SyscallCode::VERIFY_SP1_PROOF
         | SyscallCode::WRITE
         | SyscallCode::ENTER_UNCONSTRAINED

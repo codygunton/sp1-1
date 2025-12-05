@@ -34,23 +34,25 @@ pub mod utils;
 pub mod utype;
 
 use air::SP1CoreAirBuilder;
-use operations::AddressSlicePageProtOperation;
+use memory::MemoryAccessCols;
+use operations::{AddressSlicePageProtOperation, IsZeroOperation, TrapOperation};
 use program::instruction::InstructionCols;
 use slop_air::AirBuilder;
+pub use sp1_core_executor::{SupervisorMode, UserMode};
 use sp1_derive::AlignedBorrow;
 use std::fmt::Debug;
 
 pub trait TrustMode: Send + Sync + 'static {
     const IS_TRUSTED: bool;
     type AdapterCols<T>;
+    type SyscallInstrCols<T>;
     type SliceProtCols<T>;
 }
 
-#[derive(Default)]
-pub struct SupervisorMode;
 impl TrustMode for SupervisorMode {
     const IS_TRUSTED: bool = true;
     type AdapterCols<T> = ();
+    type SyscallInstrCols<T> = ();
     type SliceProtCols<T> = ();
 }
 
@@ -60,11 +62,21 @@ pub struct UserModeReaderCols<T> {
     pub is_trusted: T,
 }
 
-#[derive(Default)]
-pub struct UserMode;
+#[derive(AlignedBorrow, Default, Debug, Clone, Copy)]
+#[repr(C)]
+pub struct UserModeSyscallInstrCols<T> {
+    pub is_sig_return: IsZeroOperation<T>,
+    pub next_pc_record: MemoryAccessCols<T>,
+    pub trap_operation: TrapOperation<T>,
+    pub is_not_trap: IsZeroOperation<T>,
+    pub trap_code: T,
+    pub addresses: [[T; 3]; 3],
+}
+
 impl TrustMode for UserMode {
     const IS_TRUSTED: bool = false;
     type AdapterCols<T> = UserModeReaderCols<T>;
+    type SyscallInstrCols<T> = UserModeSyscallInstrCols<T>;
     type SliceProtCols<T> = AddressSlicePageProtOperation<T>;
 }
 

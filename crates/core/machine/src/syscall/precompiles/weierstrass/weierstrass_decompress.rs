@@ -258,22 +258,8 @@ impl<F: PrimeField32, E: EllipticCurve + WeierstrassParameters, M: TrustMode> Ma
             let x = BigUint::from_bytes_le(&event.x_bytes);
             Self::populate_field_ops(&mut new_byte_lookup_events, cols, x);
 
-            for i in 0..cols.x_access.len() {
-                let record = MemoryRecordEnum::Read(event.x_memory_records[i]);
-                cols.x_access[i].populate(record, &mut new_byte_lookup_events);
-                cols.x_addrs[i].populate(
-                    &mut new_byte_lookup_events,
-                    event.ptr + num_limbs as u64,
-                    8 * i as u64,
-                );
-            }
-            for i in 0..cols.y_access.len() {
-                let record = MemoryRecordEnum::Write(event.y_memory_records[i]);
-                let current_record = record.current_record();
-                cols.y_access[i].populate(record, &mut new_byte_lookup_events);
-                cols.y_value[i] = Word::from(current_record.value);
-                cols.y_addrs[i].populate(&mut new_byte_lookup_events, event.ptr, 8 * i as u64);
-            }
+            let mut is_not_trap = true;
+            let mut trap_code = 0u8;
 
             if !M::IS_TRUSTED {
                 let cols: &mut WeierstrassDecompressCols<F, E::BaseField, UserMode> =
@@ -284,9 +270,9 @@ impl<F: PrimeField32, E: EllipticCurve + WeierstrassParameters, M: TrustMode> Ma
                     event.ptr + num_limbs as u64 + 8 * (cols.x_addrs.len() - 1) as u64,
                     event.clk,
                     PROT_READ,
-                    &event.page_prot_records.read_page_prot_records[0],
-                    &event.page_prot_records.read_page_prot_records.get(1).copied(),
-                    1,
+                    &event.page_prot_records.read_page_prot_records,
+                    &mut is_not_trap,
+                    &mut trap_code,
                 );
 
                 cols.write_slice_page_prot_access.populate(
@@ -295,10 +281,35 @@ impl<F: PrimeField32, E: EllipticCurve + WeierstrassParameters, M: TrustMode> Ma
                     event.ptr + 8 * (cols.y_addrs.len() - 1) as u64,
                     event.clk + 1,
                     PROT_WRITE,
-                    &event.page_prot_records.write_page_prot_records[0],
-                    &event.page_prot_records.write_page_prot_records.get(1).copied(),
-                    1,
+                    &event.page_prot_records.write_page_prot_records,
+                    &mut is_not_trap,
+                    &mut trap_code,
                 );
+            }
+
+            for i in 0..cols.x_access.len() {
+                cols.x_addrs[i].populate(
+                    &mut new_byte_lookup_events,
+                    event.ptr + num_limbs as u64,
+                    8 * i as u64,
+                );
+                if is_not_trap {
+                    let record = MemoryRecordEnum::Read(event.x_memory_records[i]);
+                    cols.x_access[i].populate(record, &mut new_byte_lookup_events);
+                } else {
+                    cols.x_access[i] = MemoryAccessColsU8::default();
+                }
+            }
+            for i in 0..cols.y_access.len() {
+                cols.y_addrs[i].populate(&mut new_byte_lookup_events, event.ptr, 8 * i as u64);
+                if is_not_trap {
+                    let record = MemoryRecordEnum::Write(event.y_memory_records[i]);
+                    let current_record = record.current_record();
+                    cols.y_access[i].populate(record, &mut new_byte_lookup_events);
+                    cols.y_value[i] = Word::from(current_record.value);
+                } else {
+                    cols.y_access[i] = MemoryAccessCols::default();
+                }
             }
 
             if matches!(self.sign_rule, SignChoiceRule::Lexicographic) {
@@ -425,9 +436,43 @@ where
         let num_limbs = <E::BaseField as NumLimbs>::Limbs::USIZE;
         let num_words_field_element = num_limbs / 8;
 
+        let mut is_not_trap = local.is_real.into();
+        let mut trap_code = AB::Expr::zero();
+
+        // Page protection evaluation only for user mode
+        if !M::IS_TRUSTED {
+            let local_slice = main.row_slice(0);
+            let local: &WeierstrassDecompressCols<AB::Var, E::BaseField, UserMode> =
+                (*local_slice)[0..weierstrass_cols].borrow();
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into(),
+                &local.x_addrs[0].value.map(Into::into),
+                &local.x_addrs[local.x_addrs.len() - 1].value.map(Into::into),
+                PROT_READ,
+                &local.read_slice_page_prot_access,
+                &mut is_not_trap,
+                &mut trap_code,
+            );
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into() + AB::Expr::one(),
+                &local.ptr.addr.map(Into::into),
+                &local.y_addrs[local.y_addrs.len() - 1].value.map(Into::into),
+                PROT_WRITE,
+                &local.write_slice_page_prot_access,
+                &mut is_not_trap,
+                &mut trap_code,
+            );
+        }
+
         builder.assert_bool(local.sign_bit);
 
-        let x_limbs = builder.generate_limbs(&local.x_access, local.is_real.into());
+        let x_limbs = builder.generate_limbs(&local.x_access, is_not_trap.clone());
         let x: Limbs<AB::Expr, <E::BaseField as NumLimbs>::Limbs> =
             Limbs(x_limbs.try_into().expect("failed to convert limbs"));
         let max_num_limbs = E::BaseField::to_limbs_field_vec(&E::BaseField::modulus());
@@ -612,7 +657,7 @@ where
                 local.clk_low,
                 &local.x_addrs[i].value.map(Into::into),
                 local.x_access[i].memory_access,
-                local.is_real,
+                is_not_trap.clone(),
             );
         }
         for i in 0..num_words_field_element {
@@ -622,7 +667,7 @@ where
                 &local.y_addrs[i].value.map(Into::into),
                 local.y_access[i],
                 local.y_value[i],
-                local.is_real,
+                is_not_trap.clone(),
             );
         }
 
@@ -630,35 +675,6 @@ where
             builder.extract_public_values().is_untrusted_programs_enabled,
             AB::Expr::from_bool(!M::IS_TRUSTED),
         );
-
-        // Page protection evaluation only for user mode
-        if !M::IS_TRUSTED {
-            let local_slice = main.row_slice(0);
-            let local: &WeierstrassDecompressCols<AB::Var, E::BaseField, UserMode> =
-                (*local_slice)[0..weierstrass_cols].borrow();
-
-            AddressSlicePageProtOperation::<AB::F>::eval(
-                builder,
-                local.clk_high.into(),
-                local.clk_low.into(),
-                &local.x_addrs[0].value.map(Into::into),
-                &local.x_addrs[local.x_addrs.len() - 1].value.map(Into::into),
-                AB::Expr::from_canonical_u8(PROT_READ),
-                &local.read_slice_page_prot_access,
-                local.is_real.into(),
-            );
-
-            AddressSlicePageProtOperation::<AB::F>::eval(
-                builder,
-                local.clk_high.into(),
-                local.clk_low.into() + AB::Expr::one(),
-                &local.ptr.addr.map(Into::into),
-                &local.y_addrs[local.y_addrs.len() - 1].value.map(Into::into),
-                AB::Expr::from_canonical_u8(PROT_WRITE),
-                &local.write_slice_page_prot_access,
-                local.is_real.into(),
-            );
-        }
 
         let syscall_id = match E::CURVE_TYPE {
             CurveType::Secp256k1 => {
@@ -677,6 +693,7 @@ where
             local.clk_high,
             local.clk_low,
             syscall_id,
+            trap_code,
             ptr.map(Into::into),
             [local.sign_bit.into(), AB::Expr::zero(), AB::Expr::zero()].map(Into::into),
             local.is_real,

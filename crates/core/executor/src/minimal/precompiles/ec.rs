@@ -22,10 +22,12 @@ pub(crate) unsafe fn ec_add<E: EllipticCurve>(
     }
     let num_words = <E::BaseField as NumWords>::WordsCurvePoint::USIZE;
 
+    let clk = ctx.get_current_clk();
     ctx.read_slice_check(q_ptr, num_words)?;
     ctx.bump_memory_clk();
     ctx.read_write_slice_check(p_ptr, num_words)?;
 
+    ctx.set_clk(clk);
     let p_affine = AffinePoint::<E>::from_words_le(ctx.mr_slice_unsafe(p_ptr, num_words));
     let q_affine = AffinePoint::<E>::from_words_le(ctx.mr_slice_without_prot(q_ptr, num_words));
     let result_affine = p_affine + q_affine;

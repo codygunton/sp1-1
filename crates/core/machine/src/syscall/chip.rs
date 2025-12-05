@@ -7,7 +7,7 @@ use slop_matrix::Matrix;
 use slop_maybe_rayon::prelude::{IndexedParallelIterator, ParallelIterator, ParallelSliceMut};
 use sp1_core_executor::{
     events::{ByteRecord, GlobalInteractionEvent, SyscallEvent},
-    ExecutionRecord, Program,
+    ExecutionRecord, Program, TrapError,
 };
 use sp1_derive::AlignedBorrow;
 use sp1_hypercube::{
@@ -63,6 +63,9 @@ pub struct SyscallCols<T: Copy> {
     /// The syscall_id of the syscall.
     pub syscall_id: T,
 
+    /// The trap code of the syscall.
+    pub trap_code: T,
+
     /// The arg1.
     pub arg1: [T; 3],
 
@@ -104,15 +107,26 @@ impl<F: PrimeField32> MachineAir<F> for SyscallChip {
             .iter()
             .filter(|e| e.should_send)
             .map(|event| {
+                let trap_code =
+                    if let Some(TrapError::PagePermissionViolation(code)) = event.trap_error {
+                        code as u8
+                    } else {
+                        0
+                    };
+
                 let mut blu = Vec::new();
-                blu.add_u8_range_checks(&[event.syscall_id as u8]);
-                blu.add_u16_range_checks(&[(event.arg1 & 0xFFFF) as u16]);
+                blu.add_u8_range_checks(&[event.syscall_id as u8, trap_code]);
+                blu.add_u16_range_checks(&[
+                    (event.arg1 & 0xFFFF) as u16,
+                    ((event.arg1 >> 16) & 0xFFFF) as u16,
+                ]);
+
                 let global_event = GlobalInteractionEvent {
                     message: [
                         (event.clk >> 24) as u32,
                         (event.clk & 0xFFFFFF) as u32,
                         event.syscall_id + (1 << 8) * (event.arg1 & 0xFFFF) as u32,
-                        ((event.arg1 >> 16) & 0xFFFF) as u32,
+                        trap_code as u32 + (1 << 8) * ((event.arg1 >> 16) & 0xFFFF) as u32,
                         ((event.arg1 >> 32) & 0xFFFF) as u32,
                         (event.arg2 & 0xFFFF) as u32,
                         ((event.arg2 >> 16) & 0xFFFF) as u32,
@@ -160,6 +174,14 @@ impl<F: PrimeField32> MachineAir<F> for SyscallChip {
             cols.clk_low = F::from_canonical_u32((syscall_event.clk & 0xFFFFFF) as u32);
             cols.syscall_id = F::from_canonical_u32(syscall_event.syscall_code.syscall_id());
 
+            let trap_code =
+                if let Some(TrapError::PagePermissionViolation(code)) = syscall_event.trap_error {
+                    code
+                } else {
+                    0
+                };
+
+            cols.trap_code = F::from_canonical_u64(trap_code);
             cols.arg1 = [
                 F::from_canonical_u64((syscall_event.arg1 & 0xFFFF) as u64),
                 F::from_canonical_u64(((syscall_event.arg1 >> 16) & 0xFFFF) as u64),
@@ -257,10 +279,10 @@ where
             local.is_real * local.is_real * local.is_real,
         );
 
-        // Constrain that the syscall id is 8 bits.
-        builder.slice_range_check_u8(&[local.syscall_id], local.is_real);
-        // Constrain that the arg1 is 16 bits.
-        builder.slice_range_check_u16(&[local.arg1[0]], local.is_real);
+        // Constrain that the syscall id and trap code is 8 bits.
+        builder.slice_range_check_u8(&[local.syscall_id, local.trap_code], local.is_real);
+        // Constrain that the arg1[0] and arg1[1] are 16 bits.
+        builder.slice_range_check_u16(&[local.arg1[0], local.arg1[1]], local.is_real);
 
         match self.shard_kind {
             SyscallShardKind::Core => {
@@ -268,6 +290,7 @@ where
                     local.clk_high,
                     local.clk_low,
                     local.syscall_id,
+                    local.trap_code,
                     local.arg1.map(Into::into),
                     local.arg2.map(Into::into),
                     local.is_real,
@@ -281,7 +304,8 @@ where
                             local.clk_high.into(),
                             local.clk_low.into(),
                             local.syscall_id + local.arg1[0] * AB::F::from_canonical_u32(1 << 8),
-                            local.arg1[1].into(),
+                            local.trap_code
+                                + local.arg1[1].into() * AB::F::from_canonical_u32(1 << 8),
                             local.arg1[2].into(),
                             local.arg2[0].into(),
                             local.arg2[1].into(),
@@ -301,6 +325,7 @@ where
                     local.clk_high,
                     local.clk_low,
                     local.syscall_id,
+                    local.trap_code,
                     local.arg1.map(Into::into),
                     local.arg2.map(Into::into),
                     local.is_real,
@@ -314,7 +339,8 @@ where
                             local.clk_high.into(),
                             local.clk_low.into(),
                             local.syscall_id + local.arg1[0] * AB::F::from_canonical_u32(1 << 8),
-                            local.arg1[1].into(),
+                            local.trap_code
+                                + local.arg1[1].into() * AB::F::from_canonical_u32(1 << 8),
                             local.arg1[2].into(),
                             local.arg2[0].into(),
                             local.arg2[1].into(),

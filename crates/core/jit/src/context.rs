@@ -11,10 +11,8 @@ pub trait SyscallContext {
     /// Write next pc
     fn set_next_pc(&mut self, pc: u64);
     /// Read a value from memory.
-    fn mr(&mut self, addr: u64) -> Result<u64, Interrupt>;
     fn mr_without_prot(&mut self, addr: u64) -> u64;
     /// Write a value to memory.
-    fn mw(&mut self, addr: u64, val: u64) -> Result<(), Interrupt>;
     fn mw_without_prot(&mut self, addr: u64, val: u64);
     /// Read a slice of values from memory.
     fn mr_slice(
@@ -22,7 +20,7 @@ pub trait SyscallContext {
         addr: u64,
         len: usize,
     ) -> Result<impl IntoIterator<Item = &u64>, Interrupt> {
-        self.prot_slice_check(addr, len, PROT_READ, true)?;
+        self.prot_slice_check(addr, len, PROT_READ)?;
         Ok(self.mr_slice_without_prot(addr, len))
     }
     /// Read a slice of values from memory, without checking page permissions
@@ -34,7 +32,7 @@ pub trait SyscallContext {
     fn mr_slice_no_trace(&mut self, addr: u64, len: usize) -> impl IntoIterator<Item = &u64>;
     /// Write a slice of values to memory.
     fn mw_slice(&mut self, addr: u64, vals: &[u64]) -> Result<(), Interrupt> {
-        self.prot_slice_check(addr, vals.len(), PROT_WRITE, true)?;
+        self.prot_slice_check(addr, vals.len(), PROT_WRITE)?;
         self.mw_slice_without_prot(addr, vals);
         Ok(())
     }
@@ -42,23 +40,18 @@ pub trait SyscallContext {
     fn mw_slice_without_prot(&mut self, addr: u64, vals: &[u64]);
     #[inline]
     fn read_slice_check(&mut self, addr: u64, len: usize) -> Result<(), Interrupt> {
-        self.prot_slice_check(addr, len, PROT_READ, true)
+        self.prot_slice_check(addr, len, PROT_READ)
     }
     #[inline]
     fn write_slice_check(&mut self, addr: u64, len: usize) -> Result<(), Interrupt> {
-        self.prot_slice_check(addr, len, PROT_WRITE, true)
+        self.prot_slice_check(addr, len, PROT_WRITE)
     }
     #[inline]
     fn read_write_slice_check(&mut self, addr: u64, len: usize) -> Result<(), Interrupt> {
-        self.prot_slice_check(addr, len, PROT_READ | PROT_WRITE, true)
+        self.prot_slice_check(addr, len, PROT_READ | PROT_WRITE)
     }
-    fn prot_slice_check(
-        &mut self,
-        addr: u64,
-        len: usize,
-        prot_bitmap: u8,
-        update_clk: bool,
-    ) -> Result<(), Interrupt>;
+    fn prot_slice_check(&mut self, addr: u64, len: usize, prot_bitmap: u8)
+        -> Result<(), Interrupt>;
     fn page_prot_write(&mut self, addr: u64, val: u8);
     /// Get the input buffer
     fn input_buffer(&mut self) -> &mut VecDeque<Vec<u8>>;
@@ -77,6 +70,8 @@ pub trait SyscallContext {
     /// This increment is local to the precompile, and does not affect the number of cycles
     /// the precompile itself takes up.
     fn bump_memory_clk(&mut self);
+    fn get_current_clk(&self) -> u64;
+    fn set_clk(&mut self, clk: u64);
     /// Set the exit code of the program.
     fn set_exit_code(&mut self, exit_code: u32);
     /// Returns if were in unconstrained mode.
@@ -124,6 +119,16 @@ impl SyscallContext for JitContext {
         self.clk += 1;
     }
 
+    #[inline]
+    fn get_current_clk(&self) -> u64 {
+        self.clk
+    }
+
+    #[inline]
+    fn set_clk(&mut self, clk: u64) {
+        self.clk = clk;
+    }
+
     fn rr(&self, reg: RiscRegister) -> u64 {
         self.registers[reg as usize]
     }
@@ -136,19 +141,8 @@ impl SyscallContext for JitContext {
         unimplemented!()
     }
 
-    fn mr(&mut self, addr: u64) -> Result<u64, Interrupt> {
-        // TODO: page permissions
-        Ok(self.mr_without_prot(addr))
-    }
-
     fn mr_without_prot(&mut self, addr: u64) -> u64 {
         unsafe { ContextMemory::new(self).mr(addr) }
-    }
-
-    fn mw(&mut self, addr: u64, val: u64) -> Result<(), Interrupt> {
-        // TODO: page permissions
-        self.mw_without_prot(addr, val);
-        Ok(())
     }
 
     fn mw_without_prot(&mut self, addr: u64, val: u64) {
@@ -234,7 +228,6 @@ impl SyscallContext for JitContext {
         _addr: u64,
         _len: usize,
         _prot_bitmap: u8,
-        _update_clk: bool,
     ) -> Result<(), Interrupt> {
         unimplemented!()
     }

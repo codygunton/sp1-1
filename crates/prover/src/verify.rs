@@ -145,6 +145,43 @@ impl SP1Verifier {
             ));
         }
 
+        // Public values and program configuration for untrusted programs.
+        // Constraints:
+        // - `enable_untrusted_programs` is equal between the `vk` and the public values.
+        // - `enable_trap_handler` is equal between the `vk` and the public values.
+        // - `trap_context` is equal between the `vk` and the public values.
+        // - `untrusted_memory` is equal between the `vk` and the public values.
+        for shard_proof in proof.0.iter() {
+            let public_values: &PublicValues<[_; 4], [_; 3], [_; 4], _> =
+                shard_proof.public_values.as_slice().borrow();
+
+            if public_values.is_untrusted_programs_enabled
+                != vk.untrusted_config.enable_untrusted_programs
+            {
+                return Err(MachineVerifierError::InvalidPublicValues(
+                    "enable_untrusted_programs flag mismatch",
+                ));
+            }
+
+            if public_values.trap_context != vk.untrusted_config.trap_context {
+                return Err(MachineVerifierError::InvalidPublicValues(
+                    "trap_context values mismatch",
+                ));
+            }
+
+            if public_values.untrusted_memory != vk.untrusted_config.untrusted_memory {
+                return Err(MachineVerifierError::InvalidPublicValues(
+                    "untrusted_memory values mismatch",
+                ));
+            }
+
+            if public_values.enable_trap_handler != vk.untrusted_config.enable_trap_handler {
+                return Err(MachineVerifierError::InvalidPublicValues(
+                    "enable_trap_handler values mismatch",
+                ));
+            }
+        }
+
         // Execution shard and timestamp constraints.
         //
         // Initialization:
@@ -343,10 +380,6 @@ impl SP1Verifier {
             } else if public_values.previous_finalize_page_idx != last_finalize_page_idx_prev {
                 return Err(MachineVerifierError::InvalidPublicValues(
                     "previous_finalize_page_idx != last_finalize_page_idx_prev",
-                ));
-            } else if public_values.is_untrusted_programs_enabled != vk.enable_untrusted_programs {
-                return Err(MachineVerifierError::InvalidPublicValues(
-                    "public_values.is_untrusted_programs_enabled != vk.enable_untrusted_programs",
                 ));
             }
 

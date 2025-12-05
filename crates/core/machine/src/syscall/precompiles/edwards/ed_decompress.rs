@@ -91,8 +91,8 @@ impl<F: PrimeField32, M: TrustMode> EdDecompressCols<F, M> {
     pub fn populate<P: FieldParameters, E: EdwardsParameters>(
         &mut self,
         event: EdDecompressEvent,
-        _is_untrusted_programs_enabled: u32,
         record: &mut ExecutionRecord,
+        is_not_trap: bool,
     ) {
         let mut new_byte_lookup_events = Vec::new();
         self.is_real = F::from_bool(true);
@@ -106,13 +106,18 @@ impl<F: PrimeField32, M: TrustMode> EdDecompressCols<F, M> {
         self.sign = F::from_bool(event.sign);
         for i in 0..WORDS_FIELD_ELEMENT {
             let x_record = MemoryRecordEnum::Write(event.x_memory_records[i]);
-            self.x_access[i].populate(x_record, &mut new_byte_lookup_events);
+            let y_record = MemoryRecordEnum::Read(event.y_memory_records[i]);
             let current_x_record = x_record.current_record();
             self.x_value[i] = Word::from(current_x_record.value);
-            let y_record = MemoryRecordEnum::Read(event.y_memory_records[i]);
-            self.y_access[i].populate(y_record, &mut new_byte_lookup_events);
             self.addrs[i].populate(record, event.ptr, i as u64 * 8);
             self.read_ptrs[i].populate(record, read_ptr, i as u64 * 8);
+            if is_not_trap {
+                self.x_access[i].populate(x_record, &mut new_byte_lookup_events);
+                self.y_access[i].populate(y_record, &mut new_byte_lookup_events);
+            } else {
+                self.x_access[i] = MemoryAccessCols::default();
+                self.y_access[i] = MemoryAccessColsU8::default();
+            }
         }
 
         let y = &BigUint::from_bytes_le(&event.y_bytes);
@@ -124,8 +129,9 @@ impl<F: PrimeField32, M: TrustMode> EdDecompressCols<F, M> {
     pub fn populate_page_prot(
         cols: &mut EdDecompressCols<F, UserMode>,
         event: &EdDecompressEvent,
-        is_untrusted_programs_enabled: u32,
         new_byte_lookup_events: &mut Vec<ByteLookupEvent>,
+        is_not_trap: &mut bool,
+        trap_code: &mut u8,
     ) {
         let read_ptr = event.ptr + 32;
         cols.read_slice_page_prot_access.populate(
@@ -134,9 +140,9 @@ impl<F: PrimeField32, M: TrustMode> EdDecompressCols<F, M> {
             read_ptr + 8 * (WORDS_FIELD_ELEMENT - 1) as u64,
             event.clk,
             PROT_READ,
-            &event.page_prot_records.read_page_prot_records[0],
-            &event.page_prot_records.read_page_prot_records.get(1).copied(),
-            is_untrusted_programs_enabled,
+            &event.page_prot_records.read_page_prot_records,
+            is_not_trap,
+            trap_code,
         );
 
         cols.write_slice_page_prot_access.populate(
@@ -145,9 +151,9 @@ impl<F: PrimeField32, M: TrustMode> EdDecompressCols<F, M> {
             event.ptr + 8 * (WORDS_FIELD_ELEMENT - 1) as u64,
             event.clk + 1,
             PROT_WRITE,
-            &event.page_prot_records.write_page_prot_records[0],
-            &event.page_prot_records.write_page_prot_records.get(1).copied(),
-            is_untrusted_programs_enabled,
+            &event.page_prot_records.write_page_prot_records,
+            is_not_trap,
+            trap_code,
         );
     }
 
@@ -176,13 +182,15 @@ impl<V: Copy, M: TrustMode> EdDecompressCols<V, M> {
     pub fn eval<AB: SP1CoreAirBuilder<Var = V>, P: FieldParameters, E: EdwardsParameters>(
         &self,
         builder: &mut AB,
+        is_not_trap: AB::Expr,
+        trap_code: AB::Expr,
     ) where
         V: Into<AB::Expr>,
     {
         builder.assert_bool(self.sign);
         builder.assert_bool(self.is_real);
 
-        let y_limbs = builder.generate_limbs(&self.y_access, self.is_real.into());
+        let y_limbs = builder.generate_limbs(&self.y_access, is_not_trap.clone());
         let y: Limbs<AB::Expr, U32> = Limbs(y_limbs.try_into().expect("failed to convert limbs"));
         let max_num_limbs =
             Ed25519BaseField::to_limbs_field::<AB::Expr, AB::F>(&Ed25519BaseField::modulus());
@@ -255,7 +263,7 @@ impl<V: Copy, M: TrustMode> EdDecompressCols<V, M> {
             self.clk_low,
             &self.read_ptrs.map(|ptr| ptr.value.map(Into::into)),
             &self.y_access.iter().map(|access| access.memory_access).collect_vec(),
-            self.is_real,
+            is_not_trap.clone(),
         );
 
         builder.eval_memory_access_slice_write(
@@ -264,7 +272,7 @@ impl<V: Copy, M: TrustMode> EdDecompressCols<V, M> {
             &self.addrs.map(|addr| addr.value.map(Into::into)),
             &self.x_access,
             self.x_value.to_vec(),
-            self.is_real,
+            is_not_trap.clone(),
         );
 
         // Constrain that x_value is correct.
@@ -290,6 +298,7 @@ impl<V: Copy, M: TrustMode> EdDecompressCols<V, M> {
             self.clk_high,
             self.clk_low,
             AB::F::from_canonical_u32(SyscallCode::ED_DECOMPRESS.syscall_id()),
+            trap_code.clone(),
             ptr.map(Into::into),
             [self.sign.into(), AB::Expr::zero(), AB::Expr::zero()],
             self.is_real,
@@ -302,18 +311,23 @@ impl<V: Copy> EdDecompressCols<V, UserMode> {
     pub fn eval_page_prot<AB: SP1CoreAirBuilder<Var = V>, E: EdwardsParameters>(
         &self,
         builder: &mut AB,
-    ) where
+    ) -> (AB::Expr, AB::Expr)
+    where
         V: Into<AB::Expr>,
     {
+        let mut is_not_trap = self.is_real.into();
+        let mut trap_code = AB::Expr::zero();
+
         AddressSlicePageProtOperation::<AB::F>::eval(
             builder,
             self.clk_high.into(),
             self.clk_low.into(),
             &self.read_ptrs[0].value.map(Into::into),
             &self.read_ptrs[WORDS_FIELD_ELEMENT - 1].value.map(Into::into),
-            AB::Expr::from_canonical_u8(PROT_READ),
+            PROT_READ,
             &self.read_slice_page_prot_access,
-            self.is_real.into(),
+            &mut is_not_trap,
+            &mut trap_code,
         );
 
         AddressSlicePageProtOperation::<AB::F>::eval(
@@ -322,10 +336,13 @@ impl<V: Copy> EdDecompressCols<V, UserMode> {
             self.clk_low.into() + AB::Expr::one(),
             &self.addrs[0].value.map(Into::into),
             &self.addrs[WORDS_FIELD_ELEMENT - 1].value.map(Into::into),
-            AB::Expr::from_canonical_u8(PROT_WRITE),
+            PROT_WRITE,
             &self.write_slice_page_prot_access,
-            self.is_real.into(),
+            &mut is_not_trap,
+            &mut trap_code,
         );
+
+        (is_not_trap, trap_code)
     }
 }
 
@@ -397,25 +414,22 @@ impl<F: PrimeField32, E: EdwardsParameters, M: TrustMode> MachineAir<F> for EdDe
             } else {
                 unreachable!();
             };
-            let cols: &mut EdDecompressCols<F, M> = row.borrow_mut();
-            cols.populate::<E::BaseField, E>(
-                event.clone(),
-                input.public_values.is_untrusted_programs_enabled,
-                output,
-            );
-
+            let mut is_not_trap = true;
+            let mut trap_code = 0;
             if !M::IS_TRUSTED {
-                let cols: &mut EdDecompressCols<F, UserMode> =
-                    unsafe { &mut *(cols as *mut _ as *mut _) };
+                let cols: &mut EdDecompressCols<F, UserMode> = row.borrow_mut();
                 let mut new_byte_lookup_events = Vec::new();
                 EdDecompressCols::<F, UserMode>::populate_page_prot(
                     cols,
                     event,
-                    input.public_values.is_untrusted_programs_enabled,
                     &mut new_byte_lookup_events,
+                    &mut is_not_trap,
+                    &mut trap_code,
                 );
                 output.add_byte_lookup_events(new_byte_lookup_events);
             }
+            let cols: &mut EdDecompressCols<F, M> = row.borrow_mut();
+            cols.populate::<E::BaseField, E>(event.clone(), output, is_not_trap);
         });
 
         for idx in num_event_rows..padded_nb_rows {
@@ -458,18 +472,20 @@ where
         let local = main.row_slice(0);
         let local: &EdDecompressCols<AB::Var, M> = (*local).borrow();
 
-        local.eval::<AB, E::BaseField, E>(builder);
+        let (mut is_trap, mut trap_code) = (local.is_real.into(), AB::Expr::zero());
+
+        if !M::IS_TRUSTED {
+            let local = main.row_slice(0);
+            let local: &EdDecompressCols<AB::Var, UserMode> = (*local).borrow();
+            (is_trap, trap_code) = local.eval_page_prot::<AB, E>(builder);
+        }
+
+        local.eval::<AB, E::BaseField, E>(builder, is_trap, trap_code);
 
         builder.assert_eq(
             builder.extract_public_values().is_untrusted_programs_enabled,
             AB::Expr::from_bool(!M::IS_TRUSTED),
         );
-
-        if !M::IS_TRUSTED {
-            let local = main.row_slice(0);
-            let local: &EdDecompressCols<AB::Var, UserMode> = (*local).borrow();
-            local.eval_page_prot::<AB, E>(builder);
-        }
     }
 }
 

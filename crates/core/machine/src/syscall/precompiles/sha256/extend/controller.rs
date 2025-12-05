@@ -129,6 +129,9 @@ impl<F: PrimeField32, M: TrustMode> MachineAir<F> for ShaExtendControlChip<M> {
             // Address of 64th element of W, last written element
             cols.w_64th_addr.populate(&mut blu_events, event.w_ptr, 63 * 8);
             cols.is_real = F::one();
+            let mut is_not_trap = true;
+            let mut trap_code = 0u8;
+
             // Constrain page prot access for initial 16 elements of W, read only
             if !M::IS_TRUSTED {
                 let cols: &mut ShaExtendControlCols<F, UserMode> = row.borrow_mut();
@@ -138,9 +141,9 @@ impl<F: PrimeField32, M: TrustMode> MachineAir<F> for ShaExtendControlChip<M> {
                     event.w_ptr + 15 * 8,
                     event.clk,
                     PROT_READ,
-                    &event.page_prot_records.initial_page_prot_records[0],
-                    &event.page_prot_records.initial_page_prot_records.get(1).copied(),
-                    input.public_values.is_untrusted_programs_enabled,
+                    &event.page_prot_records.initial_page_prot_records,
+                    &mut is_not_trap,
+                    &mut trap_code,
                 );
                 // Constrain page prot access for extension 48 elements of W, read and write
                 cols.extension_page_prot_access.populate(
@@ -149,9 +152,9 @@ impl<F: PrimeField32, M: TrustMode> MachineAir<F> for ShaExtendControlChip<M> {
                     event.w_ptr + 63 * 8,
                     event.clk + 1,
                     PROT_READ | PROT_WRITE,
-                    &event.page_prot_records.extension_page_prot_records[0],
-                    &event.page_prot_records.extension_page_prot_records.get(1).copied(),
-                    input.public_values.is_untrusted_programs_enabled,
+                    &event.page_prot_records.extension_page_prot_records,
+                    &mut is_not_trap,
+                    &mut trap_code,
                 );
             }
         });
@@ -234,6 +237,9 @@ where
             AB::Expr::from_bool(!M::IS_TRUSTED),
         );
 
+        let mut is_not_trap = local.is_real.into();
+        let mut trap_code = AB::Expr::zero();
+
         // Evaluate the page prot accesses only for user mode.
         if !M::IS_TRUSTED {
             let local = main.row_slice(0);
@@ -245,9 +251,10 @@ where
                 local.clk_low.into(),
                 &w_ptr.map(Into::into),
                 &local.w_16th_addr.value.map(Into::into),
-                AB::Expr::from_canonical_u8(PROT_READ),
+                PROT_READ,
                 &local.initial_page_prot_access,
-                local.is_real.into(),
+                &mut is_not_trap,
+                &mut trap_code,
             );
 
             AddressSlicePageProtOperation::<AB::F>::eval(
@@ -256,9 +263,10 @@ where
                 local.clk_low.into() + AB::Expr::one(),
                 &local.w_17th_addr.value.map(Into::into),
                 &local.w_64th_addr.value.map(Into::into),
-                AB::Expr::from_canonical_u8(PROT_READ | PROT_WRITE),
+                PROT_READ | PROT_WRITE,
                 &local.extension_page_prot_access,
-                local.is_real.into(),
+                &mut is_not_trap,
+                &mut trap_code,
             );
         }
 
@@ -267,6 +275,7 @@ where
             local.clk_high,
             local.clk_low,
             AB::F::from_canonical_u32(SyscallCode::SHA_EXTEND.syscall_id()),
+            trap_code.clone(),
             w_ptr.map(Into::into),
             [AB::Expr::zero(), AB::Expr::zero(), AB::Expr::zero()],
             local.is_real,
@@ -280,7 +289,7 @@ where
             .chain(once(AB::Expr::from_canonical_u32(16)))
             .collect::<Vec<_>>();
         builder.send(
-            AirInteraction::new(send_values, local.is_real.into(), InteractionKind::ShaExtend),
+            AirInteraction::new(send_values, is_not_trap.clone(), InteractionKind::ShaExtend),
             InteractionScope::Local,
         );
 
@@ -291,7 +300,7 @@ where
             .chain(once(AB::Expr::from_canonical_u32(64)))
             .collect::<Vec<_>>();
         builder.receive(
-            AirInteraction::new(receive_values, local.is_real.into(), InteractionKind::ShaExtend),
+            AirInteraction::new(receive_values, is_not_trap.clone(), InteractionKind::ShaExtend),
             InteractionScope::Local,
         );
     }

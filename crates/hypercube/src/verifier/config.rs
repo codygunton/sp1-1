@@ -29,6 +29,39 @@ pub struct ChipDimensions<T> {
     pub num_polynomials: T,
 }
 
+/// A configuration regarding untrusted programs and trap handler.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UntrustedConfig<T> {
+    /// Whether or not untrusted programs are enabled on the program.
+    pub enable_untrusted_programs: T,
+    /// Whether or not a trap handler exists.
+    pub enable_trap_handler: T,
+    /// The `address`, `address + 8`, `address + 16` values of the trap context.
+    pub trap_context: [[T; 3]; 3],
+    /// The region of memory where mprotect syscall may be called.
+    pub untrusted_memory: [[T; 3]; 2],
+}
+
+impl<T: AbstractField> UntrustedConfig<T> {
+    /// A dummy config with all zeros
+    #[must_use]
+    pub fn zero() -> Self {
+        Self {
+            enable_untrusted_programs: T::zero(),
+            enable_trap_handler: T::zero(),
+            trap_context: [
+                [T::zero(), T::zero(), T::zero()],
+                [T::zero(), T::zero(), T::zero()],
+                [T::zero(), T::zero(), T::zero()],
+            ],
+            untrusted_memory: [
+                [T::zero(), T::zero(), T::zero()],
+                [T::zero(), T::zero(), T::zero()],
+            ],
+        }
+    }
+}
+
 /// A verifying key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MachineVerifyingKey<C: IopCtx> {
@@ -38,8 +71,8 @@ pub struct MachineVerifyingKey<C: IopCtx> {
     pub initial_global_cumulative_sum: SepticDigest<C::F>,
     /// The preprocessed commitments.
     pub preprocessed_commit: C::Digest,
-    /// Flag indicating if untrusted programs are allowed.
-    pub enable_untrusted_programs: C::F,
+    /// Metadata on configuration regarding untrusted programs.
+    pub untrusted_config: UntrustedConfig<C::F>,
 }
 
 impl<C: IopCtx> PartialEq for MachineVerifyingKey<C> {
@@ -47,7 +80,7 @@ impl<C: IopCtx> PartialEq for MachineVerifyingKey<C> {
         self.pc_start == other.pc_start
             && self.initial_global_cumulative_sum == other.initial_global_cumulative_sum
             && self.preprocessed_commit == other.preprocessed_commit
-            && self.enable_untrusted_programs == other.enable_untrusted_programs
+            && self.untrusted_config == other.untrusted_config
     }
 }
 
@@ -60,7 +93,11 @@ impl<C: IopCtx> MachineVerifyingKey<C> {
         challenger.observe_constant_length_slice(&self.pc_start);
         challenger.observe_constant_length_slice(&self.initial_global_cumulative_sum.0.x.0);
         challenger.observe_constant_length_slice(&self.initial_global_cumulative_sum.0.y.0);
-        challenger.observe(self.enable_untrusted_programs);
+        challenger.observe(self.untrusted_config.enable_untrusted_programs);
+        challenger.observe(self.untrusted_config.enable_trap_handler);
+        challenger.observe_constant_length_slice(self.untrusted_config.trap_context.as_flattened());
+        challenger
+            .observe_constant_length_slice(self.untrusted_config.untrusted_memory.as_flattened());
         // Observe the padding.
         challenger.observe_constant_length_slice(&[C::F::zero(); 6]);
     }

@@ -104,14 +104,16 @@ where
     GC::Digest: Borrow<[SP1Field; DIGEST_SIZE]>,
 {
     fn hash_koalabear(&self) -> [SP1Field; DIGEST_SIZE] {
-        let num_inputs = DIGEST_SIZE + 3 + 14 + 1;
+        let num_inputs = DIGEST_SIZE + 3 + 14 + 1 + 1 + 9 + 6;
         let mut inputs = Vec::with_capacity(num_inputs);
         inputs.extend(self.preprocessed_commit.borrow());
         inputs.extend(self.pc_start);
         inputs.extend(self.initial_global_cumulative_sum.0.x.0);
         inputs.extend(self.initial_global_cumulative_sum.0.y.0);
-        inputs.push(self.enable_untrusted_programs);
-
+        inputs.push(self.untrusted_config.enable_untrusted_programs);
+        inputs.push(self.untrusted_config.enable_trap_handler);
+        inputs.extend(self.untrusted_config.trap_context.as_flattened());
+        inputs.extend(self.untrusted_config.untrusted_memory.as_flattened());
         poseidon2_hash(inputs)
     }
 

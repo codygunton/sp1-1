@@ -18,7 +18,7 @@ use lru::LruCache;
 
 use slop_algebra::PrimeField32;
 
-use sp1_core_executor::{MinimalExecutor, SP1CoreOpts};
+use sp1_core_executor::{MinimalExecutorEnum, SP1CoreOpts};
 use sp1_core_machine::{executor::ExecutionOutput, io::SP1Stdin};
 use sp1_hypercube::{
     air::{PublicValues, PROOF_NONCE_NUM_WORDS},
@@ -43,14 +43,14 @@ use crate::{
 };
 
 #[derive(Clone)]
-pub struct MinimalExecutorCache(Arc<Mutex<Option<MinimalExecutor>>>);
+pub struct MinimalExecutorCache(Arc<Mutex<Option<MinimalExecutorEnum>>>);
 
 impl MinimalExecutorCache {
     pub fn empty() -> Self {
         Self(Arc::new(Mutex::new(None)))
     }
 
-    pub async fn lock(&self) -> MutexGuard<'_, Option<MinimalExecutor>> {
+    pub async fn lock(&self) -> MutexGuard<'_, Option<MinimalExecutorEnum>> {
         self.0.lock().await
     }
 }

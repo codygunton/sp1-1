@@ -25,7 +25,7 @@ use sp1_hypercube::{
     operations::poseidon2::{permutation::Poseidon2Cols, Poseidon2Operation},
     Word,
 };
-use sp1_primitives::consts::{PROT_READ, PROT_WRITE};
+use sp1_primitives::consts::{PROT_READ, PROT_WRITE, WORD_SIZE};
 use std::{
     borrow::{Borrow, BorrowMut},
     marker::PhantomData,
@@ -123,6 +123,19 @@ impl<F: PrimeField32, M: TrustMode> MachineAir<F> for Poseidon2Chip<M> {
         }
 
         let width = <Poseidon2Chip<M> as BaseAir<F>>::width(self);
+        let mut dummy_row = vec![F::zero(); width];
+        let dummy_cols: &mut Poseidon2Cols2<F, M> = dummy_row.as_mut_slice().borrow_mut();
+
+        let dummy_input = [F::zero(); 16];
+        dummy_cols.poseidon2_operation =
+            sp1_hypercube::operations::poseidon2::trace::populate_perm_deg3(dummy_input, None);
+        let output = dummy_cols.poseidon2_operation.permutation.perm_output();
+        let mut dummy_value = [0u64; 8];
+        for i in 0..8 {
+            dummy_value[i] = output[2 * i].as_canonical_u64()
+                + (1u64 << 32) * output[2 * i + 1].as_canonical_u64();
+        }
+
         // Generate the trace rows & corresponding records for each event.
         let events = input.get_precompile_events(SyscallCode::POSEIDON2);
         let num_event_rows = events.len();
@@ -164,13 +177,33 @@ impl<F: PrimeField32, M: TrustMode> MachineAir<F> for Poseidon2Chip<M> {
 
                     cols.ptr.populate(&mut byte_lookup_events, event.ptr, 64);
 
+                    let mut is_not_trap = true;
+                    let mut trap_code = 0u8;
+
+                    if !M::IS_TRUSTED {
+                        let cols: &mut Poseidon2Cols2<F, UserMode> = row.borrow_mut();
+                        // Populate the address slice page prot access.
+                        cols.address_slice_page_prot_access.populate(
+                            &mut byte_lookup_events,
+                            event.ptr,
+                            event.ptr + 7 * 8,
+                            event.clk,
+                            PROT_READ | PROT_WRITE,
+                            &event.page_prot_records,
+                            &mut is_not_trap,
+                            &mut trap_code,
+                        );
+                    }
+
+                    let cols: &mut Poseidon2Cols2<F, M> = row.borrow_mut();
                     // Populate memory columns for the 8 u64 words.
                     for i in 0..8 {
                         cols.addrs[i].populate(&mut byte_lookup_events, event.ptr, 8 * i as u64);
-
-                        let memory_record = MemoryRecordEnum::Write(event.memory_records[i]);
-                        cols.memory[i].populate(memory_record, &mut byte_lookup_events);
-                        cols.hash_result[i] = Word::from(event.memory_records[i].value);
+                        cols.hash_result[i] = if is_not_trap {
+                            Word::from(event.memory_records[i].value)
+                        } else {
+                            Word::from(dummy_value[i])
+                        };
 
                         cols.hash_result_range_checkers[2 * i].populate(
                             Word([
@@ -190,13 +223,22 @@ impl<F: PrimeField32, M: TrustMode> MachineAir<F> for Poseidon2Chip<M> {
                             ]),
                             &mut byte_lookup_events,
                         );
+
+                        if is_not_trap {
+                            let memory_record = MemoryRecordEnum::Write(event.memory_records[i]);
+                            cols.memory[i].populate(memory_record, &mut byte_lookup_events);
+                        } else {
+                            cols.memory[i] = MemoryAccessCols::default();
+                            cols.memory[i].prev_value = Word([F::zero(); WORD_SIZE]);
+                        }
                     }
 
                     // Extract the input values from memory.
                     let posiedon_input: [F; 16] = {
                         let mut values = [F::zero(); 16];
                         for i in 0..8 {
-                            let val = event.memory_records[i].prev_value;
+                            let val =
+                                if is_not_trap { event.memory_records[i].prev_value } else { 0 };
                             let val_lo = val as u32;
                             let val_hi = (val >> 32) as u32;
                             values[2 * i] = F::from_canonical_u32(val_lo);
@@ -213,7 +255,11 @@ impl<F: PrimeField32, M: TrustMode> MachineAir<F> for Poseidon2Chip<M> {
                     let poseidon_output: [F; 16] = {
                         let mut values = [F::zero(); 16];
                         for i in 0..8 {
-                            let val = event.memory_records[i].value;
+                            let val = if is_not_trap {
+                                event.memory_records[i].value
+                            } else {
+                                dummy_value[i]
+                            };
                             values[2 * i] = F::from_canonical_u32(val as u32);
                             values[2 * i + 1] = F::from_canonical_u32((val >> 32) as u32);
                         }
@@ -226,20 +272,6 @@ impl<F: PrimeField32, M: TrustMode> MachineAir<F> for Poseidon2Chip<M> {
                             posiedon_input,
                             Some(poseidon_output),
                         );
-                    if !M::IS_TRUSTED {
-                        let cols: &mut Poseidon2Cols2<F, UserMode> = row.borrow_mut();
-                        // Populate the address slice page prot access.
-                        cols.address_slice_page_prot_access.populate(
-                            &mut byte_lookup_events,
-                            event.ptr,
-                            event.ptr + 7 * 8,
-                            event.clk,
-                            PROT_READ | PROT_WRITE,
-                            &event.page_prot_records[0],
-                            &event.page_prot_records.get(1).copied(),
-                            input.public_values.is_untrusted_programs_enabled,
-                        );
-                    }
                 } else {
                     // Populate with dummy Poseidon2 operation for padding rows.
                     let dummy_input = [F::zero(); 16];
@@ -256,6 +288,20 @@ impl<F: PrimeField32, M: TrustMode> MachineAir<F> for Poseidon2Chip<M> {
     fn generate_dependencies(&self, input: &Self::Record, output: &mut Self::Record) {
         if input.program.enable_untrusted_programs == M::IS_TRUSTED {
             return;
+        }
+
+        let width = <Poseidon2Chip<M> as BaseAir<F>>::width(self);
+        let mut dummy_row = vec![F::zero(); width];
+        let dummy_cols: &mut Poseidon2Cols2<F, M> = dummy_row.as_mut_slice().borrow_mut();
+
+        let dummy_input = [F::zero(); 16];
+        dummy_cols.poseidon2_operation =
+            sp1_hypercube::operations::poseidon2::trace::populate_perm_deg3(dummy_input, None);
+        let hash_output = dummy_cols.poseidon2_operation.permutation.perm_output();
+        let mut dummy_value = [0u64; 8];
+        for i in 0..8 {
+            dummy_value[i] = hash_output[2 * i].as_canonical_u64()
+                + (1u64 << 32) * hash_output[2 * i + 1].as_canonical_u64();
         }
 
         let width = <Poseidon2Chip<M> as BaseAir<F>>::width(self);
@@ -278,6 +324,10 @@ impl<F: PrimeField32, M: TrustMode> MachineAir<F> for Poseidon2Chip<M> {
                     };
 
                     cols.ptr.populate(&mut blu, event.ptr, 64);
+
+                    let mut is_not_trap = true;
+                    let mut trap_code = 0u8;
+
                     if !M::IS_TRUSTED {
                         let cols: &mut Poseidon2Cols2<F, UserMode> =
                             row.as_mut_slice().borrow_mut();
@@ -287,19 +337,20 @@ impl<F: PrimeField32, M: TrustMode> MachineAir<F> for Poseidon2Chip<M> {
                             event.ptr + 7 * 8,
                             event.clk,
                             PROT_READ | PROT_WRITE,
-                            &event.page_prot_records[0],
-                            &event.page_prot_records.get(1).copied(),
-                            input.public_values.is_untrusted_programs_enabled,
+                            &event.page_prot_records,
+                            &mut is_not_trap,
+                            &mut trap_code,
                         );
                     }
                     let cols: &mut Poseidon2Cols2<F, M> = row.as_mut_slice().borrow_mut();
                     // Populate memory columns for the 8 u64 words.
                     for i in 0..8 {
                         cols.addrs[i].populate(&mut blu, event.ptr, 8 * i as u64);
-
-                        let memory_record = MemoryRecordEnum::Write(event.memory_records[i]);
-                        cols.memory[i].populate(memory_record, &mut blu);
-                        cols.hash_result[i] = Word::from(event.memory_records[i].value);
+                        cols.hash_result[i] = if is_not_trap {
+                            Word::from(event.memory_records[i].value)
+                        } else {
+                            Word::from(dummy_value[i])
+                        };
 
                         blu.add_u16_range_checks_field(&cols.hash_result[i].0);
                         cols.hash_result_range_checkers[2 * i].populate(
@@ -320,11 +371,18 @@ impl<F: PrimeField32, M: TrustMode> MachineAir<F> for Poseidon2Chip<M> {
                             ]),
                             &mut blu,
                         );
+
+                        if is_not_trap {
+                            let memory_record = MemoryRecordEnum::Write(event.memory_records[i]);
+                            cols.memory[i].populate(memory_record, &mut blu);
+                        } else {
+                            cols.memory[i] = MemoryAccessCols::default();
+                        }
                     }
 
                     // Extract the input values from memory.
                     for i in 0..8 {
-                        let val = event.memory_records[i].prev_value;
+                        let val = if is_not_trap { event.memory_records[i].prev_value } else { 0 };
                         let val_lo = val as u32;
                         let val_hi = (val >> 32) as u32;
                         blu.add_u16_range_checks_field::<F>(&Word::from(val).0);
@@ -385,6 +443,26 @@ where
             );
         }
 
+        let mut is_not_trap = local.is_real.into();
+        let mut trap_code = AB::Expr::zero();
+
+        if !M::IS_TRUSTED {
+            let local = main.row_slice(0);
+            let local: &Poseidon2Cols2<AB::Var, UserMode> = (*local).borrow();
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into(),
+                &local.ptr.addr.map(Into::into),
+                &local.addrs[local.addrs.len() - 1].value.map(Into::into),
+                PROT_READ | PROT_WRITE,
+                &local.address_slice_page_prot_access,
+                &mut is_not_trap,
+                &mut trap_code,
+            );
+        }
+
         // Evaluate memory access: read input, write output at the same addresses.
         builder.eval_memory_access_slice_write(
             local.clk_high,
@@ -392,7 +470,7 @@ where
             &local.addrs.map(|addr| addr.value.map(Into::into)),
             &local.memory,
             local.hash_result.to_vec(),
-            local.is_real,
+            is_not_trap.clone(),
         );
 
         // Get the input values from memory (prev_value).
@@ -508,27 +586,12 @@ where
             AB::Expr::from_bool(!M::IS_TRUSTED),
         );
 
-        if !M::IS_TRUSTED {
-            let local = main.row_slice(0);
-            let local: &Poseidon2Cols2<AB::Var, UserMode> = (*local).borrow();
-
-            AddressSlicePageProtOperation::<AB::F>::eval(
-                builder,
-                local.clk_high.into(),
-                local.clk_low.into(),
-                &local.ptr.addr.map(Into::into),
-                &local.addrs[local.addrs.len() - 1].value.map(Into::into),
-                AB::Expr::from_canonical_u8(PROT_READ | PROT_WRITE),
-                &local.address_slice_page_prot_access,
-                local.is_real.into(),
-            );
-        }
-
         // Receive the syscall.
         builder.receive_syscall(
             local.clk_high,
             local.clk_low.into(),
             AB::F::from_canonical_u32(SyscallCode::POSEIDON2.syscall_id()),
+            trap_code.clone(),
             ptr.map(Into::into),
             [AB::Expr::zero(), AB::Expr::zero(), AB::Expr::zero()],
             local.is_real,

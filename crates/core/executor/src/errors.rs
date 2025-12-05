@@ -1,9 +1,18 @@
 //! Error types for the SP1 executor.
 
+use deepsize2::DeepSizeOf;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::Opcode;
+
+/// Trap conditions that the [``Executor``] can throw.
+#[derive(Error, Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Copy, DeepSizeOf)]
+pub enum TrapError {
+    /// Page permission check fails
+    #[error("Page permission violation error, code: {0}")]
+    PagePermissionViolation(u64),
+}
 
 /// Errors that the executor can throw.
 #[derive(Error, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -56,9 +65,9 @@ pub enum ExecutionError {
     #[error("Running executor in non-sharding state, but got a shard boundary or trace end")]
     InvalidShardingState(),
 
-    /// Page permission check fails
-    #[error("Page permission violation error, code: {0}")]
-    PagePermissionViolation(u64),
+    /// Trap occurred without a valid handler.
+    #[error("Trap occurred without proper handling")]
+    UnhandledTrap(TrapError),
 
     /// A generic error.
     #[error("{0}")]

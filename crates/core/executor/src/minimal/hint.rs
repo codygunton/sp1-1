@@ -1,5 +1,6 @@
 use sp1_jit::{Interrupt, SyscallContext};
 
+#[allow(clippy::unnecessary_wraps)]
 pub unsafe fn hint_read(
     ctx: &mut impl SyscallContext,
     ptr: u64,

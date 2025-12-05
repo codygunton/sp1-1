@@ -82,6 +82,10 @@ pub const BN254_FP2_MUL_ELF: Elf = include_elf!("bn254-fp2-mul-test");
 
 pub const TENDERMINT_BENCHMARK_ELF: Elf = include_elf!("tendermint-benchmark-program");
 
+pub const TRAP_EXEC_ELF: Elf = include_elf!("trap-exec-program");
+
+pub const TRAP_LOAD_STORE_ELF: Elf = include_elf!("trap-load-store-program");
+
 pub const U256XU2048_MUL_ELF: Elf = include_elf!("u256x2048-mul");
 
 pub const GROTH16_ELF: Elf = include_elf!("groth16_verify");
