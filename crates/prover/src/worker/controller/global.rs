@@ -5,10 +5,12 @@ use std::{
 
 use itertools::Itertools;
 use sp1_core_executor::{
-    chunked_memory_init_events, events::MemoryInitializeFinalizeEvent, MinimalExecutor, Program,
-    SP1CoreOpts, SplitOpts, UnsafeMemory,
+    chunked_memory_init_events,
+    events::{MemoryInitializeFinalizeEvent, PageProtInitializeFinalizeEvent},
+    MinimalExecutor, Program, SP1CoreOpts, SplitOpts, UnsafeMemory,
 };
 use sp1_hypercube::air::ShardRange;
+use sp1_primitives::consts::DEFAULT_PAGE_PROT;
 use sp1_prover_types::{Artifact, ArtifactClient};
 use tokio::{
     sync::{mpsc, oneshot},
@@ -240,9 +242,46 @@ impl GlobalMemoryHandler {
                 let mut memory_finalize_events = Vec::with_capacity(finalized_events.len());
                 memory_finalize_events.extend(finalized_events.into_values());
 
+                // Collect page prot events if untrusted programs are enabled.
+                let (page_prot_initialize_events, page_prot_finalize_events) =
+                    if program.enable_untrusted_programs {
+                        let page_prots = minimal_executor.get_page_prot();
+
+                        let mut init_events = Vec::with_capacity(page_prots.len());
+                        let mut finalize_events = Vec::with_capacity(page_prots.len());
+
+                        for page_idx in page_prots.keys() {
+                            let record = page_prots.get(*page_idx).unwrap();
+
+                            // Only push initialize event if the page prot idx is not in the
+                            // initial page prot image.
+                            if !program.page_prot_image.contains_key(page_idx) {
+                                init_events.push(PageProtInitializeFinalizeEvent::initialize(
+                                    *page_idx,
+                                    DEFAULT_PAGE_PROT,
+                                ));
+                            }
+
+                            finalize_events.push(PageProtInitializeFinalizeEvent {
+                                page_idx: *page_idx,
+                                page_prot: record.value,
+                                timestamp: record.timestamp,
+                            });
+                        }
+
+                        // Sort events by page_idx.
+                        init_events.sort_by_key(|e| e.page_idx);
+                        finalize_events.sort_by_key(|e| e.page_idx);
+
+                        (init_events, finalize_events)
+                    } else {
+                        (vec![], vec![])
+                    };
+
                 // Get the split opts.
-                let split_opts = SplitOpts::new(&opts, program.instructions.len(), false);
+                let split_opts = SplitOpts::new(&opts, program.instructions.len(), program.enable_untrusted_programs);
                 let threshold = split_opts.memory;
+                let page_prot_threshold = split_opts.page_prot;
 
                 let mut previous_init_addr = 0;
                 let mut previous_finalize_addr = 0;
@@ -303,6 +342,8 @@ impl GlobalMemoryHandler {
                         final_state,
                         initialize_events,
                         finalize_events,
+                        page_prot_initialize_events: vec![],
+                        page_prot_finalize_events: vec![],
                         previous_init_addr,
                         previous_finalize_addr,
                         previous_init_page_idx,
@@ -320,6 +361,85 @@ impl GlobalMemoryHandler {
 
                     previous_init_addr = last_init_addr;
                     previous_finalize_addr = last_finalize_addr;
+                    previous_init_page_idx = last_init_page_idx;
+                    previous_finalize_page_idx = last_finalize_page_idx;
+                }
+
+                // Emit page prot shards (separate from memory shards).
+                // Keep address tracking from memory shards (for continuity),
+                // and continue page index tracking.
+                for (i, chunks) in page_prot_initialize_events
+                    .chunks(page_prot_threshold)
+                    .zip_longest(page_prot_finalize_events.chunks(page_prot_threshold))
+                    .enumerate()
+                {
+                    let (pp_init_events, pp_finalize_events) = match chunks {
+                        itertools::EitherOrBoth::Left(init_events) => {
+                            let mut events = Vec::with_capacity(page_prot_threshold);
+                            events.extend_from_slice(init_events);
+                            (events, vec![])
+                        }
+                        itertools::EitherOrBoth::Right(finalize_events) => {
+                            let mut events = Vec::with_capacity(page_prot_threshold);
+                            events.extend_from_slice(finalize_events);
+                            (vec![], events)
+                        }
+                        itertools::EitherOrBoth::Both(init_events, finalize_events) => {
+                            let mut init = Vec::with_capacity(page_prot_threshold);
+                            init.extend_from_slice(init_events);
+                            let mut fin = Vec::with_capacity(page_prot_threshold);
+                            fin.extend_from_slice(finalize_events);
+                            (init, fin)
+                        }
+                    };
+                    tracing::debug!("Got global page prot shard number {i}");
+                    let last_init_page_idx = pp_init_events
+                        .last()
+                        .map(|event| event.page_idx)
+                        .unwrap_or(previous_init_page_idx);
+                    let last_finalize_page_idx = pp_finalize_events
+                        .last()
+                        .map(|event| event.page_idx)
+                        .unwrap_or(previous_finalize_page_idx);
+                    tracing::debug!(
+                        "last_init_page_idx: {last_init_page_idx}, last_finalize_page_idx: {last_finalize_page_idx}"
+                    );
+                    // Calculate the range of the shard.
+                    let range = ShardRange {
+                        timestamp_range: (final_state.timestamp, final_state.timestamp),
+                        initialized_address_range: (previous_init_addr, previous_init_addr),
+                        finalized_address_range: (previous_finalize_addr, previous_finalize_addr),
+                        initialized_page_index_range: (previous_init_page_idx, last_init_page_idx),
+                        finalized_page_index_range: (
+                            previous_finalize_page_idx,
+                            last_finalize_page_idx,
+                        ),
+                        deferred_proof_range: (
+                            num_deferred_proofs as u64,
+                            num_deferred_proofs as u64,
+                        ),
+                    };
+                    let page_prot_global_shard = GlobalMemoryShard {
+                        final_state,
+                        initialize_events: vec![],
+                        finalize_events: vec![],
+                        page_prot_initialize_events: pp_init_events,
+                        page_prot_finalize_events: pp_finalize_events,
+                        previous_init_addr,
+                        previous_finalize_addr,
+                        previous_init_page_idx,
+                        previous_finalize_page_idx,
+                        last_init_addr: previous_init_addr,
+                        last_finalize_addr: previous_finalize_addr,
+                        last_init_page_idx,
+                        last_finalize_page_idx,
+                    };
+
+                    let data = TraceData::Memory(Box::new(page_prot_global_shard));
+                    shard_data_tx
+                        .send((range, data))
+                        .map_err(|e| anyhow::anyhow!("failed to send page prot shard data: {}", e))?;
+
                     previous_init_page_idx = last_init_page_idx;
                     previous_finalize_page_idx = last_finalize_page_idx;
                 }

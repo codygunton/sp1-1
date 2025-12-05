@@ -71,21 +71,16 @@ where
         );
 
         // Constrain the program and register reads.
-        let funct3 = AB::Expr::from_canonical_u8(Opcode::ECALL.funct3().unwrap_or(0));
-        let funct7 = AB::Expr::from_canonical_u8(Opcode::ECALL.funct7().unwrap_or(0));
-        let base_opcode = AB::Expr::from_canonical_u32(Opcode::ECALL.base_opcode().0);
-        let instr_type = AB::Expr::from_canonical_u32(Opcode::ECALL.instruction_type().0 as u32);
-
         RTypeReader::<AB::F>::eval(
             builder,
             local.state.clk_high::<AB>(),
             local.state.clk_low::<AB>(),
             local.state.pc,
             AB::Expr::from_canonical_u32(Opcode::ECALL as u32),
-            [instr_type, base_opcode, funct3, funct7],
             local.op_a_value,
             local.adapter,
             local.is_real.into(),
+            local.is_real.into(), // is_trusted - syscalls are only for trusted programs
         );
         builder.when(local.is_real).assert_zero(local.adapter.op_a_0);
 
@@ -120,6 +115,9 @@ where
 
         // HALT ecall and UNIMPL instruction.
         self.eval_halt_unimpl(builder, local, public_values);
+
+        // PAGE_PROTECT ecall instruction.
+        self.eval_page_protect(builder, local, &a, public_values.is_untrusted_programs_enabled);
     }
 }
 
@@ -358,6 +356,32 @@ impl SyscallInstrsChip {
         builder
             .when(local.is_halt)
             .assert_eq(local.adapter.b().map(Into::into).reduce::<AB>(), public_values.exit_code);
+    }
+
+    pub(crate) fn eval_page_protect<AB: SP1CoreAirBuilder>(
+        &self,
+        builder: &mut AB,
+        local: &SyscallInstrColumns<AB::Var>,
+        prev_a_byte: &[AB::Expr; 8],
+        is_page_protect_active: AB::PublicVar,
+    ) {
+        let syscall_id = prev_a_byte[0].clone();
+
+        // Compute whether this ecall is mprotect.
+        let is_mprotect = {
+            IsZeroOperation::<AB::F>::eval(
+                builder,
+                IsZeroOperationInput::new(
+                    syscall_id.clone()
+                        - AB::Expr::from_canonical_u32(SyscallCode::MPROTECT.syscall_id()),
+                    local.is_page_protect,
+                    local.is_real.into(),
+                ),
+            );
+            local.is_page_protect.result
+        };
+
+        builder.when(is_mprotect).assert_one(is_page_protect_active);
     }
 
     /// Returns a boolean expression indicating whether the instruction is a HALT instruction.

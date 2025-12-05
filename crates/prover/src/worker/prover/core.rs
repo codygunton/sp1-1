@@ -294,6 +294,8 @@ where
                                 final_state,
                                 initialize_events,
                                 finalize_events,
+                                page_prot_initialize_events,
+                                page_prot_finalize_events,
                                 previous_init_addr,
                                 previous_finalize_addr,
                                 previous_init_page_idx,
@@ -310,6 +312,8 @@ where
                             );
                             record.global_memory_initialize_events = initialize_events;
                             record.global_memory_finalize_events = finalize_events;
+                            record.global_page_prot_initialize_events = page_prot_initialize_events;
+                            record.global_page_prot_finalize_events = page_prot_finalize_events;
 
                             let enable_untrusted_programs =
                                 common_input.vk.vk.enable_untrusted_programs == SP1Field::one();
@@ -434,8 +438,9 @@ where
                 async move {
                     // SplitOpts::new() parses JSON and builds lookup tables - run in spawn_blocking
                     let program_len = program.instructions.len();
+                    let enable_untrusted_programs = program.enable_untrusted_programs;
                     let split_opts = tokio::task::spawn_blocking(move || {
-                        SplitOpts::new(&opts, program_len, false)
+                        SplitOpts::new(&opts, program_len, enable_untrusted_programs)
                     })
                     .await
                     .map_err(|e| TaskError::Fatal(e.into()))?;

@@ -1,10 +1,11 @@
-use std::borrow::Borrow;
+use std::{borrow::Borrow, marker::PhantomData};
 
 use crate::{
     air::SP1CoreAirBuilder,
     memory::{MemoryAccessCols, MemoryAccessColsU8},
-    operations::{field::field_op::FieldOpCols, AddrAddOperation},
+    operations::{field::field_op::FieldOpCols, AddrAddOperation, AddressSlicePageProtOperation},
     utils::limbs_to_words,
+    SupervisorMode, TrustMode, UserMode,
 };
 use itertools::Itertools;
 use slop_air::{Air, BaseAir};
@@ -17,24 +18,47 @@ use sp1_curves::{
 };
 use sp1_derive::AlignedBorrow;
 use sp1_hypercube::{air::InteractionScope, Word};
-use sp1_primitives::polynomial::Polynomial;
+use sp1_primitives::{
+    consts::{PROT_READ, PROT_WRITE},
+    polynomial::Polynomial,
+};
 use typenum::Unsigned;
 
 use crate::operations::SyscallAddrOperation;
 
-/// The number of main trace columns for `Uint256OpsChip`.
-pub const NUM_UINT256_OPS_COLS: usize = size_of::<Uint256OpsCols<u8>>();
+/// The number of main trace columns for `Uint256OpsChip` in supervisor mode.
+pub const fn num_uint256_ops_cols_supervisor() -> usize {
+    std::mem::size_of::<Uint256OpsCols<u8, SupervisorMode>>()
+}
+
+/// The number of main trace columns for `Uint256OpsChip` in user mode.
+pub const fn num_uint256_ops_cols_user() -> usize {
+    std::mem::size_of::<Uint256OpsCols<u8, UserMode>>()
+}
 
 /// A chip that implements uint256 operations for the SP1 RISC-V zkVM.
-#[derive(Default)]
-pub struct Uint256OpsChip;
+pub struct Uint256OpsChip<M: TrustMode> {
+    _marker: PhantomData<M>,
+}
+
+impl<M: TrustMode> Default for Uint256OpsChip<M> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<M: TrustMode> Uint256OpsChip<M> {
+    pub const fn new() -> Self {
+        Self { _marker: PhantomData }
+    }
+}
 type WordsFieldElement = <U256Field as NumWords>::WordsFieldElement;
 const WORDS_FIELD_ELEMENT: usize = WordsFieldElement::USIZE;
 
 /// The column layout for the chip.
 #[derive(AlignedBorrow, Debug, Clone)]
 #[repr(C)]
-pub struct Uint256OpsCols<T> {
+pub struct Uint256OpsCols<T, M: TrustMode> {
     /// The high bits of the clk of the syscall.
     pub clk_high: T,
 
@@ -80,22 +104,32 @@ pub struct Uint256OpsCols<T> {
 
     /// 1 if this is a real operation, 0 otherwise.
     pub is_real: T,
+
+    pub address_slice_page_prot_access_a: M::SliceProtCols<T>,
+    pub address_slice_page_prot_access_b: M::SliceProtCols<T>,
+    pub address_slice_page_prot_access_c: M::SliceProtCols<T>,
+    pub address_slice_page_prot_access_d: M::SliceProtCols<T>,
+    pub address_slice_page_prot_access_e: M::SliceProtCols<T>,
 }
 
-impl<F> BaseAir<F> for Uint256OpsChip {
+impl<F, M: TrustMode> BaseAir<F> for Uint256OpsChip<M> {
     fn width(&self) -> usize {
-        NUM_UINT256_OPS_COLS
+        if M::IS_TRUSTED {
+            num_uint256_ops_cols_supervisor()
+        } else {
+            num_uint256_ops_cols_user()
+        }
     }
 }
 
-impl<AB> Air<AB> for Uint256OpsChip
+impl<AB, M: TrustMode> Air<AB> for Uint256OpsChip<M>
 where
     AB: SP1CoreAirBuilder,
 {
     fn eval(&self, builder: &mut AB) {
         let main = builder.main();
         let local = main.row_slice(0);
-        let local: &Uint256OpsCols<AB::Var> = (*local).borrow();
+        let local: &Uint256OpsCols<AB::Var, M> = (*local).borrow();
 
         // Check that this row is enabled.
         builder.assert_bool(local.is_add);
@@ -271,5 +305,71 @@ where
             e_result,
             local.is_real,
         );
+
+        builder.assert_eq(
+            builder.extract_public_values().is_untrusted_programs_enabled,
+            AB::Expr::from_bool(!M::IS_TRUSTED),
+        );
+
+        // Evaluate the page prot accesses only for user mode.
+        if !M::IS_TRUSTED {
+            let local = main.row_slice(0);
+            let local: &Uint256OpsCols<AB::Var, UserMode> = (*local).borrow();
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into(),
+                &a_ptr.map(Into::into),
+                &local.a_addrs[WORDS_FIELD_ELEMENT - 1].value.map(Into::into),
+                AB::Expr::from_canonical_u8(PROT_READ),
+                &local.address_slice_page_prot_access_a,
+                local.is_real.into(),
+            );
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into() + AB::Expr::one(),
+                &b_ptr.map(Into::into),
+                &local.b_addrs[WORDS_FIELD_ELEMENT - 1].value.map(Into::into),
+                AB::Expr::from_canonical_u8(PROT_READ),
+                &local.address_slice_page_prot_access_b,
+                local.is_real.into(),
+            );
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into() + AB::Expr::from_canonical_u8(2),
+                &c_ptr.map(Into::into),
+                &local.c_addrs[WORDS_FIELD_ELEMENT - 1].value.map(Into::into),
+                AB::Expr::from_canonical_u8(PROT_READ),
+                &local.address_slice_page_prot_access_c,
+                local.is_real.into(),
+            );
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into() + AB::Expr::from_canonical_u8(3),
+                &d_ptr.map(Into::into),
+                &local.d_addrs[WORDS_FIELD_ELEMENT - 1].value.map(Into::into),
+                AB::Expr::from_canonical_u8(PROT_WRITE),
+                &local.address_slice_page_prot_access_d,
+                local.is_real.into(),
+            );
+
+            AddressSlicePageProtOperation::<AB::F>::eval(
+                builder,
+                local.clk_high.into(),
+                local.clk_low.into() + AB::Expr::from_canonical_u8(4),
+                &e_ptr.map(Into::into),
+                &local.e_addrs[WORDS_FIELD_ELEMENT - 1].value.map(Into::into),
+                AB::Expr::from_canonical_u8(PROT_WRITE),
+                &local.address_slice_page_prot_access_e,
+                local.is_real.into(),
+            );
+        }
     }
 }

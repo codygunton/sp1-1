@@ -2,7 +2,10 @@ use sp1_curves::{edwards::WORDS_FIELD_ELEMENT, COMPRESSED_POINT_BYTES, NUM_BYTES
 use sp1_primitives::consts::words_to_bytes_le;
 
 use crate::{
-    events::{EdDecompressEvent, MemoryReadRecord, MemoryWriteRecord, PrecompileEvent},
+    events::{
+        EdDecompressEvent, EdwardsPageProtRecords, MemoryReadRecord, MemoryWriteRecord,
+        PrecompileEvent,
+    },
     vm::syscall::SyscallRuntime,
     SyscallCode,
 };
@@ -19,17 +22,20 @@ pub(crate) fn edwards_decompress<'a, RT: SyscallRuntime<'a>>(
     assert!(sign_bit <= 1, "Sign bit must be 0 or 1.");
 
     let clk = rt.core().clk();
+
     let sign = sign_bit != 0;
 
-    let y_memory_records_vec =
+    let (y_memory_records_vec, y_page_prot_records) =
         rt.mr_slice(slice_ptr + (COMPRESSED_POINT_BYTES as u64), WORDS_FIELD_ELEMENT);
 
     rt.increment_clk();
 
     // Write decompressed X into slice
-    let x_memory_records_vec = rt.mw_slice(slice_ptr, WORDS_FIELD_ELEMENT);
+    let (x_memory_records_vec, x_page_prot_records) = rt.mw_slice(slice_ptr, WORDS_FIELD_ELEMENT);
 
     if RT::TRACING {
+        let (local_mem_access, local_page_prot_access) = rt.postprocess_precompile();
+
         let y_vec: Vec<_> = y_memory_records_vec.iter().map(|record| record.value).collect();
         let y_memory_records: [MemoryReadRecord; WORDS_FIELD_ELEMENT] =
             y_memory_records_vec.try_into().unwrap();
@@ -48,8 +54,12 @@ pub(crate) fn edwards_decompress<'a, RT: SyscallRuntime<'a>>(
             decompressed_x_bytes,
             y_memory_records,
             x_memory_records,
-            local_mem_access: rt.postprocess_precompile(),
-            ..Default::default()
+            local_mem_access,
+            page_prot_records: EdwardsPageProtRecords {
+                read_page_prot_records: y_page_prot_records,
+                write_page_prot_records: x_page_prot_records,
+            },
+            local_page_prot_access,
         };
         let syscall_event = rt.syscall_event(
             clk,

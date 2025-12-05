@@ -1,7 +1,16 @@
 use crate::{
     events::{MemoryReadRecord, MemoryWriteRecord},
-    Register,
+    Instruction, Register,
 };
+
+/// For untrusted programs, fetching an instruction might lead to a memory read
+/// and a decoding phase. It's likely we will need new records here.
+pub struct FetchResult {
+    pub pc: u64,
+    pub instruction: Option<Instruction>,
+    // TODO: do we need more records here for decoding?
+    pub mr_record: Option<MemoryReadRecord>,
+}
 
 pub struct LoadResult {
     pub a: u64,

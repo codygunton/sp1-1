@@ -184,6 +184,10 @@ where
         let local: &MProtectCols<AB::Var> = (*local).borrow();
 
         builder.assert_bool(local.is_real);
+        builder.assert_eq(
+            builder.extract_public_values().is_untrusted_programs_enabled,
+            AB::Expr::one(),
+        );
 
         // Constrain address decomposition - addr[0] should equal addr_12_bits + addr_4_bits * 4096
         builder.when(local.is_real).assert_eq(

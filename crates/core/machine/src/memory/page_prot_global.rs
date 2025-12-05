@@ -266,8 +266,14 @@ impl<F: PrimeField32> MachineAir<F> for PageProtGlobalChip {
             shape.included::<F, _>(self)
         } else {
             match self.kind {
-                MemoryChipType::Initialize => !shard.global_page_prot_initialize_events.is_empty(),
-                MemoryChipType::Finalize => !shard.global_page_prot_finalize_events.is_empty(),
+                MemoryChipType::Initialize => {
+                    !shard.global_page_prot_initialize_events.is_empty()
+                        && shard.program.enable_untrusted_programs
+                }
+                MemoryChipType::Finalize => {
+                    !shard.global_page_prot_finalize_events.is_empty()
+                        && shard.program.enable_untrusted_programs
+                }
             }
         }
     }
@@ -327,6 +333,10 @@ where
 
         // Constrain that `local.is_real` is boolean.
         builder.assert_bool(local.is_real);
+        builder.assert_eq(
+            builder.extract_public_values().is_untrusted_programs_enabled,
+            AB::Expr::one(),
+        );
 
         // Constrain that the page prot is just 3 bits.
         builder.send_byte(

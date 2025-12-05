@@ -15,7 +15,7 @@ use sp1_core_machine::syscall::precompiles::weierstrass::{
 };
 use sp1_core_machine::utils::limbs_to_words;
 use sp1_core_machine::{
-    riscv::{KeccakPermuteChip, RiscvAir},
+    riscv::{KeccakPermuteChip, RiscvAir}, TrustMode,
     syscall::precompiles::keccak256::{columns::KeccakMemCols, constants::rc_value_bit},
 };
 use sp1_curves::k256::elliptic_curve::generic_array::typenum::Unsigned;
@@ -292,8 +292,8 @@ impl<'a> BlockAir<SymbolicProverFolder<'a>> for KeccakPermuteChip {
     }
 }
 
-impl<'a, E: EllipticCurve + WeierstrassParameters> BlockAir<SymbolicProverFolder<'a>>
-    for WeierstrassAddAssignChip<E>
+impl<'a, E: EllipticCurve + WeierstrassParameters, M: TrustMode> BlockAir<SymbolicProverFolder<'a>>
+    for WeierstrassAddAssignChip<E, M>
 where
     Limbs<SymbolicVarF, <E::BaseField as NumLimbs>::Limbs>: Copy,
 {
@@ -304,7 +304,7 @@ where
     fn eval_block(&self, builder: &mut SymbolicProverFolder<'a>, index: usize) {
         let main = builder.main();
         let local = main.row_slice(0);
-        let local: &WeierstrassAddAssignCols<SymbolicVarF, E::BaseField> = (*local).borrow();
+        let local: &WeierstrassAddAssignCols<SymbolicVarF, E::BaseField, M> = (*local).borrow();
 
         let num_words_field_element = <E::BaseField as NumLimbs>::Limbs::USIZE / 8;
 
@@ -515,8 +515,8 @@ where
     }
 }
 
-impl<'a, E: EllipticCurve + WeierstrassParameters> BlockAir<SymbolicProverFolder<'a>>
-    for WeierstrassDoubleAssignChip<E>
+impl<'a, E: EllipticCurve + WeierstrassParameters, M: TrustMode> BlockAir<SymbolicProverFolder<'a>>
+    for WeierstrassDoubleAssignChip<E, M>
 where
     Limbs<SymbolicVarF, <E::BaseField as NumLimbs>::Limbs>: Copy,
 {
@@ -527,7 +527,7 @@ where
     fn eval_block(&self, builder: &mut SymbolicProverFolder<'a>, index: usize) {
         let main = builder.main();
         let local = main.row_slice(0);
-        let local: &WeierstrassDoubleAssignCols<SymbolicVarF, E::BaseField> = (*local).borrow();
+        let local: &WeierstrassDoubleAssignCols<SymbolicVarF, E::BaseField, M> = (*local).borrow();
 
         let num_words_field_element = <E::BaseField as NumLimbs>::Limbs::USIZE / 8;
 

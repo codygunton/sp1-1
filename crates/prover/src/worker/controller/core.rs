@@ -4,7 +4,7 @@ use futures::{prelude::*, stream::FuturesUnordered};
 use serde::{Deserialize, Serialize};
 use slop_futures::pipeline::Pipeline;
 use sp1_core_executor::{
-    events::{MemoryInitializeFinalizeEvent, MemoryRecord},
+    events::{MemoryInitializeFinalizeEvent, MemoryRecord, PageProtInitializeFinalizeEvent},
     CoreVM, ExecutionError, MinimalExecutor, Program, SP1CoreOpts, SyscallCode, UnsafeMemory,
 };
 use sp1_core_machine::{executor::ExecutionOutput, io::SP1Stdin};
@@ -48,6 +48,8 @@ pub struct GlobalMemoryShard {
     pub final_state: FinalVmState,
     pub initialize_events: Vec<MemoryInitializeFinalizeEvent>,
     pub finalize_events: Vec<MemoryInitializeFinalizeEvent>,
+    pub page_prot_initialize_events: Vec<PageProtInitializeFinalizeEvent>,
+    pub page_prot_finalize_events: Vec<PageProtInitializeFinalizeEvent>,
     pub previous_init_addr: u64,
     pub previous_finalize_addr: u64,
     pub previous_init_page_idx: u64,

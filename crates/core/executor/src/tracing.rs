@@ -6,16 +6,18 @@ use std::{
 use hashbrown::HashMap;
 use sp1_hypercube::air::{PublicValues, PROOF_NONCE_NUM_WORDS};
 use sp1_jit::MinimalTrace;
+use sp1_primitives::consts::{LOG_PAGE_SIZE, PAGE_SIZE};
 
 use crate::{
     events::{
-        AluEvent, BranchEvent, IntoMemoryRecord, JumpEvent, MemInstrEvent, MemoryLocalEvent,
-        MemoryReadRecord, MemoryRecord, MemoryRecordEnum, MemoryWriteRecord, PrecompileEvent,
-        SyscallEvent, UTypeEvent,
+        AluEvent, BranchEvent, InstructionDecodeEvent, InstructionFetchEvent, IntoMemoryRecord,
+        JumpEvent, MemInstrEvent, MemoryAccessPosition, MemoryLocalEvent, MemoryReadRecord,
+        MemoryRecord, MemoryRecordEnum, MemoryWriteRecord, PageProtLocalEvent, PageProtRecord,
+        PrecompileEvent, SyscallEvent, UTypeEvent,
     },
     vm::{
         results::{
-            AluResult, BranchResult, CycleResult, EcallResult, JumpResult, LoadResult,
+            AluResult, BranchResult, CycleResult, EcallResult, FetchResult, JumpResult, LoadResult,
             MaybeImmediate, StoreResult, UTypeResult,
         },
         syscall::SyscallRuntime,
@@ -31,8 +33,14 @@ pub struct TracingVM<'a> {
     pub core: CoreVM<'a>,
     /// The local memory access for the CPU.
     pub local_memory_access: LocalMemoryAccess,
+    /// The local page prot access for the CPU.
+    pub local_page_prot_access: LocalPageProtAccess,
     /// The local memory access for any deferred precompiles.
     pub precompile_local_memory_access: Option<LocalMemoryAccess>,
+    /// The local page prot access for any deferred precompiles.
+    pub precompile_local_page_prot_access: Option<LocalPageProtAccess>,
+    /// Decoded instruction events.
+    pub decoded_instruction_events: HashMap<u32, InstructionDecodeEvent>,
     /// The execution record were populating.
     pub record: &'a mut ExecutionRecord,
 }
@@ -66,13 +74,13 @@ impl TracingVM<'_> {
 
     /// Execute the next instruction at the current PC.
     pub fn execute_instruction(&mut self) -> Result<CycleResult, ExecutionError> {
-        let instruction = self.core.fetch();
+        let FetchResult { instruction, mr_record, pc } = self.core.fetch()?;
         if instruction.is_none() {
             unreachable!("Fetching the next instruction failed");
         }
 
         // SAFETY: The instruction is guaranteed to be valid as we checked for `is_none` above.
-        let instruction = unsafe { *instruction.unwrap_unchecked() };
+        let instruction = unsafe { instruction.unwrap_unchecked() };
 
         match &instruction.opcode {
             Opcode::ADD
@@ -104,7 +112,7 @@ impl TracingVM<'_> {
             | Opcode::DIVUW
             | Opcode::REMUW
             | Opcode::REMW => {
-                self.execute_alu(&instruction);
+                self.execute_alu(&instruction, mr_record.as_ref(), pc);
             }
             Opcode::LB
             | Opcode::LBU
@@ -112,20 +120,20 @@ impl TracingVM<'_> {
             | Opcode::LHU
             | Opcode::LW
             | Opcode::LWU
-            | Opcode::LD => self.execute_load(&instruction)?,
+            | Opcode::LD => self.execute_load(&instruction, mr_record.as_ref(), pc)?,
             Opcode::SB | Opcode::SH | Opcode::SW | Opcode::SD => {
-                self.execute_store(&instruction)?;
+                self.execute_store(&instruction, mr_record.as_ref(), pc)?;
             }
             Opcode::JAL | Opcode::JALR => {
-                self.execute_jump(&instruction);
+                self.execute_jump(&instruction, mr_record.as_ref(), pc);
             }
             Opcode::BEQ | Opcode::BNE | Opcode::BLT | Opcode::BGE | Opcode::BLTU | Opcode::BGEU => {
-                self.execute_branch(&instruction);
+                self.execute_branch(&instruction, mr_record.as_ref(), pc);
             }
             Opcode::LUI | Opcode::AUIPC => {
-                self.execute_utype(&instruction);
+                self.execute_utype(&instruction, mr_record.as_ref(), pc);
             }
-            Opcode::ECALL => self.execute_ecall(&instruction)?,
+            Opcode::ECALL => self.execute_ecall(&instruction, mr_record.as_ref(), pc)?,
             Opcode::EBREAK | Opcode::UNIMP => {
                 unreachable!("Invalid opcode for `execute_instruction`: {:?}", instruction.opcode)
             }
@@ -140,6 +148,9 @@ impl TracingVM<'_> {
         }
 
         self.record.program = self.core.program.clone();
+        self.record.public_values.is_untrusted_programs_enabled =
+            self.core.program.enable_untrusted_programs as u32;
+
         if self.record.contains_cpu() {
             self.record.public_values.pc_start = self.record.pc_start.unwrap();
             self.record.public_values.next_pc = self.record.next_pc;
@@ -150,6 +161,16 @@ impl TracingVM<'_> {
 
         for (_, event) in self.local_memory_access.inner.drain() {
             self.record.cpu_local_memory_access.push(event);
+        }
+
+        if self.core.program.enable_untrusted_programs {
+            for (_, event) in self.local_page_prot_access.inner.drain() {
+                self.record.cpu_local_page_prot_access.push(event);
+            }
+
+            let decoded_events =
+                std::mem::replace(&mut self.decoded_instruction_events, HashMap::new());
+            self.record.instruction_decode_events.extend(decoded_events.into_values());
         }
     }
 
@@ -193,7 +214,10 @@ impl<'a> TracingVM<'a> {
             core: CoreVM::new(trace, program, opts, proof_nonce),
             record,
             local_memory_access: LocalMemoryAccess::default(),
+            local_page_prot_access: LocalPageProtAccess::default(),
             precompile_local_memory_access: None,
+            precompile_local_page_prot_access: None,
+            decoded_instruction_events: HashMap::new(),
         }
     }
 
@@ -209,7 +233,12 @@ impl<'a> TracingVM<'a> {
     /// and the register write.
     ///
     /// It will also emit the memory instruction event and the events for the load instruction.
-    pub fn execute_load(&mut self, instruction: &Instruction) -> Result<(), ExecutionError> {
+    pub fn execute_load(
+        &mut self,
+        instruction: &Instruction,
+        untrusted_instruction_record: Option<&MemoryReadRecord>,
+        pc: u64,
+    ) -> Result<(), ExecutionError> {
         let LoadResult { mut a, b, c, rs1, rd, addr, rr_record, rw_record, mr_record } =
             self.core.execute_load(instruction)?;
 
@@ -218,7 +247,8 @@ impl<'a> TracingVM<'a> {
             b: Some(MemoryRecordEnum::Read(rr_record)),
             c: None,
             memory: Some(MemoryRecordEnum::Read(mr_record)),
-            untrusted_instruction: None,
+            untrusted_instruction: untrusted_instruction_record
+                .map(|&record| (record.into(), (record.value >> (pc % 8 * 8)) as u32)),
         };
 
         let op_a_0 = instruction.op_a == 0;
@@ -229,6 +259,24 @@ impl<'a> TracingVM<'a> {
         self.local_memory_access.insert_record(rd as u64, rw_record);
         self.local_memory_access.insert_record(rs1 as u64, rr_record);
         self.local_memory_access.insert_record(addr & !0b111, mr_record);
+        if let Some(untrusted_instruction_record) = untrusted_instruction_record {
+            self.local_memory_access.insert_record(pc & !0b111, *untrusted_instruction_record);
+            self.local_page_prot_access.insert_record(
+                pc / PAGE_SIZE as u64,
+                untrusted_instruction_record.prev_page_prot_record.unwrap(),
+                self.core.clk(),
+                untrusted_instruction_record.prev_page_prot_record.unwrap().page_prot,
+            );
+        }
+
+        if self.core.program.enable_untrusted_programs {
+            self.local_page_prot_access.insert_record(
+                addr / PAGE_SIZE as u64,
+                mr_record.prev_page_prot_record.unwrap(),
+                self.core.clk() + MemoryAccessPosition::Memory as u64,
+                mr_record.prev_page_prot_record.unwrap().page_prot,
+            );
+        }
 
         self.emit_events(self.core.clk(), self.core.next_pc(), instruction, &mem_access_record, 0);
         self.emit_mem_instr_event(instruction, a, b, c, &mem_access_record, op_a_0);
@@ -242,7 +290,12 @@ impl<'a> TracingVM<'a> {
     /// and the register write.
     ///
     /// It will also emit the memory instruction event and the events for the store instruction.
-    fn execute_store(&mut self, instruction: &Instruction) -> Result<(), ExecutionError> {
+    fn execute_store(
+        &mut self,
+        instruction: &Instruction,
+        untrusted_instruction_record: Option<&MemoryReadRecord>,
+        pc: u64,
+    ) -> Result<(), ExecutionError> {
         let StoreResult { mut a, b, c, rs1, rs2, addr, rs1_record, rs2_record, mw_record } =
             self.core.execute_store(instruction)?;
 
@@ -251,7 +304,8 @@ impl<'a> TracingVM<'a> {
             b: Some(MemoryRecordEnum::Read(rs2_record)),
             c: None,
             memory: Some(MemoryRecordEnum::Write(mw_record)),
-            untrusted_instruction: None,
+            untrusted_instruction: untrusted_instruction_record
+                .map(|&record| (record.into(), (record.value >> (pc % 8 * 8)) as u32)),
         };
 
         let op_a_0 = instruction.op_a == 0;
@@ -262,6 +316,24 @@ impl<'a> TracingVM<'a> {
         self.local_memory_access.insert_record(addr & !0b111, mw_record);
         self.local_memory_access.insert_record(rs1 as u64, rs1_record);
         self.local_memory_access.insert_record(rs2 as u64, rs2_record);
+        if let Some(untrusted_instruction_record) = untrusted_instruction_record {
+            self.local_memory_access.insert_record(pc & !0b111, *untrusted_instruction_record);
+            self.local_page_prot_access.insert_record(
+                pc / PAGE_SIZE as u64,
+                untrusted_instruction_record.prev_page_prot_record.unwrap(),
+                self.core.clk(),
+                untrusted_instruction_record.prev_page_prot_record.unwrap().page_prot,
+            );
+        }
+
+        if self.core.program.enable_untrusted_programs {
+            self.local_page_prot_access.insert_record(
+                addr / PAGE_SIZE as u64,
+                mw_record.prev_page_prot_record.unwrap(),
+                self.core.clk() + MemoryAccessPosition::Memory as u64,
+                mw_record.prev_page_prot_record.unwrap().page_prot,
+            );
+        }
 
         self.emit_mem_instr_event(instruction, a, b, c, &mem_access_record, op_a_0);
         self.emit_events(self.core.clk(), self.core.next_pc(), instruction, &mem_access_record, 0);
@@ -270,7 +342,12 @@ impl<'a> TracingVM<'a> {
     }
 
     /// Execute an ALU instruction and emit the events.
-    fn execute_alu(&mut self, instruction: &Instruction) {
+    fn execute_alu(
+        &mut self,
+        instruction: &Instruction,
+        untrusted_instruction_record: Option<&MemoryReadRecord>,
+        pc: u64,
+    ) {
         let AluResult { rd, rw_record, mut a, b, c, rs1, rs2 } = self.core.execute_alu(instruction);
 
         if let MaybeImmediate::Register(rs2, rs2_record) = rs2 {
@@ -282,13 +359,23 @@ impl<'a> TracingVM<'a> {
         }
 
         self.local_memory_access.insert_record(rd as u64, rw_record);
+        if let Some(untrusted_instruction_record) = untrusted_instruction_record {
+            self.local_memory_access.insert_record(pc & !0b111, *untrusted_instruction_record);
+            self.local_page_prot_access.insert_record(
+                pc / PAGE_SIZE as u64,
+                untrusted_instruction_record.prev_page_prot_record.unwrap(),
+                self.core.clk(),
+                untrusted_instruction_record.prev_page_prot_record.unwrap().page_prot,
+            );
+        }
 
         let mem_access_record = MemoryAccessRecord {
             a: Some(MemoryRecordEnum::Write(rw_record)),
             b: rs1.record().map(|r| MemoryRecordEnum::Read(*r)),
             c: rs2.record().map(|r| MemoryRecordEnum::Read(*r)),
             memory: None,
-            untrusted_instruction: None,
+            untrusted_instruction: untrusted_instruction_record
+                .map(|&record| (record.into(), (record.value >> (pc % 8 * 8)) as u32)),
         };
 
         let op_a_0 = instruction.op_a == 0;
@@ -301,7 +388,12 @@ impl<'a> TracingVM<'a> {
     }
 
     /// Execute a jump instruction and emit the events.
-    fn execute_jump(&mut self, instruction: &Instruction) {
+    fn execute_jump(
+        &mut self,
+        instruction: &Instruction,
+        untrusted_instruction_record: Option<&MemoryReadRecord>,
+        pc: u64,
+    ) {
         let JumpResult { mut a, b, c, rd, rd_record, rs1 } = self.core.execute_jump(instruction);
 
         if let MaybeImmediate::Register(rs1, rs1_record) = rs1 {
@@ -309,13 +401,23 @@ impl<'a> TracingVM<'a> {
         }
 
         self.local_memory_access.insert_record(rd as u64, rd_record);
+        if let Some(untrusted_instruction_record) = untrusted_instruction_record {
+            self.local_memory_access.insert_record(pc & !0b111, *untrusted_instruction_record);
+            self.local_page_prot_access.insert_record(
+                pc / PAGE_SIZE as u64,
+                untrusted_instruction_record.prev_page_prot_record.unwrap(),
+                self.core.clk(),
+                untrusted_instruction_record.prev_page_prot_record.unwrap().page_prot,
+            );
+        }
 
         let mem_access_record = MemoryAccessRecord {
             a: Some(MemoryRecordEnum::Write(rd_record)),
             b: rs1.record().map(|r| MemoryRecordEnum::Read(*r)),
             c: None,
             memory: None,
-            untrusted_instruction: None,
+            untrusted_instruction: untrusted_instruction_record
+                .map(|&record| (record.into(), (record.value >> (pc % 8 * 8)) as u32)),
         };
 
         let op_a_0 = instruction.op_a == 0;
@@ -348,19 +450,34 @@ impl<'a> TracingVM<'a> {
     }
 
     /// Execute a branch instruction and emit the events.
-    fn execute_branch(&mut self, instruction: &Instruction) {
+    fn execute_branch(
+        &mut self,
+        instruction: &Instruction,
+        untrusted_instruction_record: Option<&MemoryReadRecord>,
+        pc: u64,
+    ) {
         let BranchResult { mut a, rs1, a_record, b, rs2, b_record, c } =
             self.core.execute_branch(instruction);
 
         self.local_memory_access.insert_record(rs2 as u64, b_record);
         self.local_memory_access.insert_record(rs1 as u64, a_record);
+        if let Some(untrusted_instruction_record) = untrusted_instruction_record {
+            self.local_memory_access.insert_record(pc & !0b111, *untrusted_instruction_record);
+            self.local_page_prot_access.insert_record(
+                pc / PAGE_SIZE as u64,
+                untrusted_instruction_record.prev_page_prot_record.unwrap(),
+                self.core.clk(),
+                untrusted_instruction_record.prev_page_prot_record.unwrap().page_prot,
+            );
+        }
 
         let mem_access_record = MemoryAccessRecord {
             a: Some(MemoryRecordEnum::Read(a_record)),
             b: Some(MemoryRecordEnum::Read(b_record)),
             c: None,
             memory: None,
-            untrusted_instruction: None,
+            untrusted_instruction: untrusted_instruction_record
+                .map(|&record| (record.into(), (record.value >> (pc % 8 * 8)) as u32)),
         };
 
         let op_a_0 = instruction.op_a == 0;
@@ -381,17 +498,32 @@ impl<'a> TracingVM<'a> {
     }
 
     /// Execute a U-type instruction and emit the events.   
-    fn execute_utype(&mut self, instruction: &Instruction) {
+    fn execute_utype(
+        &mut self,
+        instruction: &Instruction,
+        untrusted_instruction_record: Option<&MemoryReadRecord>,
+        pc: u64,
+    ) {
         let UTypeResult { mut a, b, c, rd, rw_record } = self.core.execute_utype(instruction);
 
         self.local_memory_access.insert_record(rd as u64, rw_record);
+        if let Some(untrusted_instruction_record) = untrusted_instruction_record {
+            self.local_memory_access.insert_record(pc & !0b111, *untrusted_instruction_record);
+            self.local_page_prot_access.insert_record(
+                pc / PAGE_SIZE as u64,
+                untrusted_instruction_record.prev_page_prot_record.unwrap(),
+                self.core.clk(),
+                untrusted_instruction_record.prev_page_prot_record.unwrap().page_prot,
+            );
+        }
 
         let mem_access_record = MemoryAccessRecord {
             a: Some(MemoryRecordEnum::Write(rw_record)),
             b: None,
             c: None,
             memory: None,
-            untrusted_instruction: None,
+            untrusted_instruction: untrusted_instruction_record
+                .map(|&record| (record.into(), (record.value >> (pc % 8 * 8)) as u32)),
         };
 
         let op_a_0 = instruction.op_a == 0;
@@ -404,7 +536,12 @@ impl<'a> TracingVM<'a> {
     }
 
     /// Execute an ecall instruction and emit the events.
-    fn execute_ecall(&mut self, instruction: &Instruction) -> Result<(), ExecutionError> {
+    fn execute_ecall(
+        &mut self,
+        instruction: &Instruction,
+        untrusted_instruction_record: Option<&MemoryReadRecord>,
+        pc: u64,
+    ) -> Result<(), ExecutionError> {
         let code = self.core.read_code();
 
         // If the syscall is not retained, we need to track the local memory access separately.
@@ -413,11 +550,19 @@ impl<'a> TracingVM<'a> {
         // `postprocess_precompile` method.
         if !self.core().is_retained_syscall(code) && code.should_send() == 1 {
             self.precompile_local_memory_access = Some(LocalMemoryAccess::default());
+            if self.core.program.enable_untrusted_programs {
+                self.precompile_local_page_prot_access = Some(LocalPageProtAccess::default());
+            } else {
+                self.precompile_local_page_prot_access = None;
+            }
+        } else {
+            self.precompile_local_page_prot_access = None;
+            self.precompile_local_memory_access = None;
         }
 
         // Actually execute the ecall.
         let EcallResult { a: _, a_record, b, b_record, c, c_record } =
-            CoreVM::<'a>::execute_ecall(self, instruction, code)?;
+            CoreVM::<'a>::execute_ecall(&mut PrecompileMemory::new(self), instruction, code)?;
 
         self.local_memory_access.insert_record(Register::X11 as u64, c_record);
         self.local_memory_access.insert_record(Register::X10 as u64, b_record);
@@ -428,7 +573,8 @@ impl<'a> TracingVM<'a> {
             b: Some(MemoryRecordEnum::Read(b_record)),
             c: Some(MemoryRecordEnum::Read(c_record)),
             memory: None,
-            untrusted_instruction: None,
+            untrusted_instruction: untrusted_instruction_record
+                .map(|&record| (record.into(), (record.value >> (pc % 8 * 8)) as u32)),
         };
 
         let op_a_0 = instruction.op_a == 0;
@@ -498,6 +644,38 @@ impl TracingVM<'_> {
                 self.record.bump_memory_events.push((x, instruction.op_c, false));
             }
         }
+
+        if let Some((_record, instruction_value)) = record.untrusted_instruction {
+            let encoded_instruction = instruction_value;
+
+            self.emit_instruction_fetch_event(instruction, encoded_instruction, record);
+
+            self.decoded_instruction_events
+                .entry(encoded_instruction)
+                .and_modify(|e| e.multiplicity += 1)
+                .or_insert_with(|| InstructionDecodeEvent {
+                    instruction: *instruction,
+                    encoded_instruction,
+                    multiplicity: 1,
+                });
+        }
+    }
+
+    /// Emit a instruction fetch event.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_instruction_fetch_event(
+        &mut self,
+        instruction: &Instruction,
+        encoded_instruction: u32,
+        record: &MemoryAccessRecord,
+    ) {
+        let event = InstructionFetchEvent {
+            clk: self.core.clk(),
+            pc: self.core.pc(),
+            instruction: *instruction,
+            encoded_instruction,
+        };
+        self.record.instruction_fetch_events.push((event, *record));
     }
 
     /// Emit a memory instruction event.
@@ -828,11 +1006,39 @@ impl<'a> SyscallRuntime<'a> for TracingVM<'a> {
             self.local_memory_access.insert_record(addr, record);
         }
 
+        let clk = self.core().clk();
+        if let Some(local_page_prot_access) = &mut self.precompile_local_page_prot_access {
+            local_page_prot_access.insert_record(
+                addr >> LOG_PAGE_SIZE,
+                record.prev_page_prot_record.unwrap(),
+                clk,
+                record.prev_page_prot_record.unwrap().page_prot,
+            );
+        } else {
+            self.local_page_prot_access.insert_record(
+                addr >> LOG_PAGE_SIZE,
+                record.prev_page_prot_record.unwrap(),
+                clk,
+                record.prev_page_prot_record.unwrap().page_prot,
+            );
+        }
+
         record
     }
 
-    fn mr_slice(&mut self, addr: u64, len: usize) -> Vec<MemoryReadRecord> {
-        let records = SyscallRuntime::mr_slice(self.core_mut(), addr, len);
+    fn mr_without_prot(&mut self, addr: u64) -> MemoryReadRecord {
+        let record = SyscallRuntime::mr_without_prot(self.core_mut(), addr);
+        if let Some(local_memory_access) = &mut self.precompile_local_memory_access {
+            local_memory_access.insert_record(addr, record);
+        } else {
+            self.local_memory_access.insert_record(addr, record);
+        }
+
+        record
+    }
+
+    fn mr_slice(&mut self, addr: u64, len: usize) -> (Vec<MemoryReadRecord>, Vec<PageProtRecord>) {
+        let (records, page_prot_records) = SyscallRuntime::mr_slice(self.core_mut(), addr, len);
 
         for (i, record) in records.iter().enumerate() {
             if let Some(local_memory_access) = &mut self.precompile_local_memory_access {
@@ -842,7 +1048,26 @@ impl<'a> SyscallRuntime<'a> for TracingVM<'a> {
             }
         }
 
-        records
+        let clk = self.core().clk();
+        for (i, record) in page_prot_records.iter().enumerate() {
+            if let Some(local_page_prot_access) = &mut self.precompile_local_page_prot_access {
+                local_page_prot_access.insert_record(
+                    (addr >> LOG_PAGE_SIZE) + i as u64,
+                    *record,
+                    clk,
+                    record.page_prot,
+                );
+            } else {
+                self.local_page_prot_access.insert_record(
+                    (addr >> LOG_PAGE_SIZE) + i as u64,
+                    *record,
+                    clk,
+                    record.page_prot,
+                );
+            }
+        }
+
+        (records, page_prot_records)
     }
 
     fn mw(&mut self, addr: u64) -> MemoryWriteRecord {
@@ -854,11 +1079,38 @@ impl<'a> SyscallRuntime<'a> for TracingVM<'a> {
             self.local_memory_access.insert_record(addr, record);
         }
 
+        let clk = self.core().clk();
+        if let Some(local_page_prot_access) = &mut self.precompile_local_page_prot_access {
+            local_page_prot_access.insert_record(
+                addr >> LOG_PAGE_SIZE,
+                record.prev_page_prot_record.unwrap(),
+                clk,
+                record.prev_page_prot_record.unwrap().page_prot,
+            );
+        } else {
+            self.local_page_prot_access.insert_record(
+                addr >> LOG_PAGE_SIZE,
+                record.prev_page_prot_record.unwrap(),
+                clk,
+                record.prev_page_prot_record.unwrap().page_prot,
+            );
+        }
+
         record
     }
 
-    fn mw_slice(&mut self, addr: u64, len: usize) -> Vec<MemoryWriteRecord> {
-        let records = SyscallRuntime::mw_slice(self.core_mut(), addr, len);
+    fn mw_without_prot(&mut self, addr: u64) -> MemoryWriteRecord {
+        let record = SyscallRuntime::mw_without_prot(self.core_mut(), addr);
+        if let Some(local_memory_access) = &mut self.precompile_local_memory_access {
+            local_memory_access.insert_record(addr, record);
+        } else {
+            self.local_memory_access.insert_record(addr, record);
+        }
+        record
+    }
+
+    fn mw_slice(&mut self, addr: u64, len: usize) -> (Vec<MemoryWriteRecord>, Vec<PageProtRecord>) {
+        let (records, page_prot_records) = SyscallRuntime::mw_slice(self.core_mut(), addr, len);
 
         for (i, record) in records.iter().enumerate() {
             if let Some(local_memory_access) = &mut self.precompile_local_memory_access {
@@ -868,25 +1120,39 @@ impl<'a> SyscallRuntime<'a> for TracingVM<'a> {
             }
         }
 
-        records
-    }
-
-    fn postprocess_precompile(&mut self) -> Vec<MemoryLocalEvent> {
-        let mut precompile_local_memory_access = Vec::new();
-
-        if let Some(mut local_memory_access) =
-            std::mem::take(&mut self.precompile_local_memory_access)
-        {
-            for (addr, event) in local_memory_access.drain() {
-                if let Some(cpu_mem_access) = self.local_memory_access.remove(&addr) {
-                    self.record.cpu_local_memory_access.push(cpu_mem_access);
-                }
-
-                precompile_local_memory_access.push(event);
+        let clk = self.core().clk();
+        for (i, record) in page_prot_records.iter().enumerate() {
+            if let Some(local_page_prot_access) = &mut self.precompile_local_page_prot_access {
+                local_page_prot_access.insert_record(
+                    (addr >> LOG_PAGE_SIZE) + i as u64,
+                    *record,
+                    clk,
+                    record.page_prot,
+                );
+            } else {
+                self.local_page_prot_access.insert_record(
+                    (addr >> LOG_PAGE_SIZE) + i as u64,
+                    *record,
+                    clk,
+                    record.page_prot,
+                );
             }
         }
 
-        precompile_local_memory_access
+        (records, page_prot_records)
+    }
+
+    fn page_prot_write(&mut self, page_idx: u64, prot: u8) -> PageProtRecord {
+        let record = SyscallRuntime::page_prot_write(self.core_mut(), page_idx, prot);
+
+        let clk = self.core().clk();
+        if let Some(local_page_prot_access) = &mut self.precompile_local_page_prot_access {
+            local_page_prot_access.insert_record(page_idx, record, clk, prot);
+        } else {
+            self.local_page_prot_access.insert_record(page_idx, record, clk, prot);
+        }
+
+        record
     }
 }
 
@@ -933,5 +1199,258 @@ impl Deref for LocalMemoryAccess {
 impl DerefMut for LocalMemoryAccess {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct LocalPageProtAccess {
+    pub inner: HashMap<u64, PageProtLocalEvent>,
+}
+
+impl LocalPageProtAccess {
+    #[inline]
+    #[allow(clippy::needless_pass_by_value)]
+    pub(crate) fn insert_record(
+        &mut self,
+        page_idx: u64,
+        previous_record: PageProtRecord,
+        clk: u64,
+        value: u8,
+    ) {
+        self.inner
+            .entry(page_idx)
+            .and_modify(|e| e.final_page_prot_access.timestamp = clk)
+            .or_insert(PageProtLocalEvent {
+                page_idx,
+                initial_page_prot_access: previous_record,
+                final_page_prot_access: {
+                    let mut final_prev_page_prot_record = previous_record;
+                    final_prev_page_prot_record.timestamp = clk;
+                    final_prev_page_prot_record.page_prot = value;
+                    final_prev_page_prot_record
+                },
+            });
+    }
+}
+
+pub struct PrecompileMemory<'a, 'b> {
+    inner: &'b mut TracingVM<'a>,
+}
+
+impl<'a, 'b> PrecompileMemory<'a, 'b> {
+    pub(crate) fn new(inner: &'b mut TracingVM<'a>) -> Self {
+        Self { inner }
+    }
+}
+
+impl<'a> SyscallRuntime<'a> for PrecompileMemory<'a, '_> {
+    const TRACING: bool = true;
+
+    fn core(&self) -> &CoreVM<'a> {
+        self.inner.core()
+    }
+
+    fn core_mut(&mut self) -> &mut CoreVM<'a> {
+        self.inner.core_mut()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn syscall_event(
+        &self,
+        clk: u64,
+        syscall_code: SyscallCode,
+        arg1: u64,
+        arg2: u64,
+        op_a_0: bool,
+        next_pc: u64,
+        exit_code: u32,
+    ) -> SyscallEvent {
+        self.inner.syscall_event(clk, syscall_code, arg1, arg2, op_a_0, next_pc, exit_code)
+    }
+
+    fn add_precompile_event(
+        &mut self,
+        syscall_code: SyscallCode,
+        syscall_event: SyscallEvent,
+        event: PrecompileEvent,
+    ) {
+        self.inner.add_precompile_event(syscall_code, syscall_event, event);
+    }
+
+    fn record_mut(&mut self) -> &mut ExecutionRecord {
+        self.inner.record_mut()
+    }
+
+    fn postprocess_precompile(&mut self) -> (Vec<MemoryLocalEvent>, Vec<PageProtLocalEvent>) {
+        let mut precompile_local_memory_access = Vec::new();
+        if let Some(local_memory_access) = &mut self.inner.precompile_local_memory_access {
+            for (addr, event) in local_memory_access.drain() {
+                if let Some(cpu_mem_access) = self.inner.local_memory_access.remove(&addr) {
+                    self.inner.record.cpu_local_memory_access.push(cpu_mem_access);
+                }
+
+                precompile_local_memory_access.push(event);
+            }
+        }
+
+        let mut precompile_local_page_prot_access = Vec::new();
+        if let Some(local_page_prot_access) = &mut self.inner.precompile_local_page_prot_access {
+            for (page_idx, event) in local_page_prot_access.inner.drain() {
+                if let Some(cpu_page_prot_access) =
+                    self.inner.local_page_prot_access.inner.remove(&page_idx)
+                {
+                    self.inner.record.cpu_local_page_prot_access.push(cpu_page_prot_access);
+                }
+
+                precompile_local_page_prot_access.push(event);
+            }
+        }
+
+        (precompile_local_memory_access, precompile_local_page_prot_access)
+    }
+
+    fn page_prot_write(&mut self, page_idx: u64, prot: u8) -> PageProtRecord {
+        let prev_page_prot_record = self.inner.page_prot_write(page_idx, prot);
+
+        let clk = self.inner.core.clk();
+        if let Some(local_page_prot_access) = &mut self.inner.precompile_local_page_prot_access {
+            local_page_prot_access.insert_record(page_idx, prev_page_prot_record, clk, prot);
+        }
+        assert!(self.inner.precompile_local_page_prot_access.is_some());
+        assert!(self.inner.precompile_local_page_prot_access.as_ref().unwrap().inner.len() == 1);
+
+        prev_page_prot_record
+    }
+
+    fn page_prot_range_check(
+        &mut self,
+        start_page_idx: u64,
+        end_page_idx: u64,
+        page_prot_bitmap: u8,
+    ) -> Vec<PageProtRecord> {
+        let records =
+            self.inner.page_prot_range_check(start_page_idx, end_page_idx, page_prot_bitmap);
+        let clk = self.inner.core.clk();
+        for record in &records {
+            if let Some(local_page_prot_access) = &mut self.inner.precompile_local_page_prot_access
+            {
+                local_page_prot_access.insert_record(
+                    record.page_idx,
+                    *record,
+                    clk,
+                    record.page_prot,
+                );
+            } else {
+                self.inner.local_page_prot_access.insert_record(
+                    record.page_idx,
+                    *record,
+                    clk,
+                    record.page_prot,
+                );
+            }
+        }
+        records
+    }
+
+    fn rr(&mut self, reg_no: usize) -> MemoryReadRecord {
+        debug_assert!(reg_no < 32, "out of bounds register: {reg_no}");
+
+        let current_clk = self.inner.core.clk();
+        let registers = self.inner.core.registers_mut();
+        let old_record = registers[reg_no];
+        let new_record = MemoryRecord { timestamp: current_clk, value: old_record.value };
+        registers[reg_no] = new_record;
+
+        let record = MemoryReadRecord {
+            value: old_record.value,
+            timestamp: self.inner.core.clk(),
+            prev_timestamp: old_record.timestamp,
+            prev_page_prot_record: None,
+        };
+
+        let reg_no = reg_no as u64;
+        if let Some(local_memory_access) = &mut self.inner.precompile_local_memory_access {
+            local_memory_access.insert_record(reg_no, record);
+        } else {
+            self.inner.local_memory_access.insert_record(reg_no, record);
+        }
+
+        record
+    }
+
+    fn mr(&mut self, addr: u64) -> MemoryReadRecord {
+        let record = self.inner.mr(addr);
+
+        if let Some(local_memory_access) = &mut self.inner.precompile_local_memory_access {
+            local_memory_access.insert_record(addr, record);
+        } else {
+            self.inner.local_memory_access.insert_record(addr, record);
+        }
+
+        record
+    }
+
+    fn mw(&mut self, addr: u64) -> MemoryWriteRecord {
+        let record = self.inner.mw(addr);
+
+        if let Some(local_memory_access) = &mut self.inner.precompile_local_memory_access {
+            local_memory_access.insert_record(addr, record);
+        } else {
+            self.inner.local_memory_access.insert_record(addr, record);
+        }
+
+        record
+    }
+
+    fn mr_slice(&mut self, addr: u64, len: usize) -> (Vec<MemoryReadRecord>, Vec<PageProtRecord>) {
+        let (records, page_prot_records) = self.inner.mr_slice(addr, len);
+
+        for (i, record) in records.iter().enumerate() {
+            if let Some(local_memory_access) = &mut self.inner.precompile_local_memory_access {
+                local_memory_access.insert_record(addr + i as u64 * 8, *record);
+            } else {
+                self.inner.local_memory_access.insert_record(addr + i as u64 * 8, *record);
+            }
+        }
+
+        (records, page_prot_records)
+    }
+
+    fn mr_without_prot(&mut self, addr: u64) -> MemoryReadRecord {
+        let record = self.inner.mr_without_prot(addr);
+
+        if let Some(local_memory_access) = &mut self.inner.precompile_local_memory_access {
+            local_memory_access.insert_record(addr, record);
+        } else {
+            self.inner.local_memory_access.insert_record(addr, record);
+        }
+
+        record
+    }
+
+    fn mw_slice(&mut self, addr: u64, len: usize) -> (Vec<MemoryWriteRecord>, Vec<PageProtRecord>) {
+        let (records, page_prot_records) = self.inner.mw_slice(addr, len);
+
+        for (i, record) in records.iter().enumerate() {
+            if let Some(local_memory_access) = &mut self.inner.precompile_local_memory_access {
+                local_memory_access.insert_record(addr + i as u64 * 8, *record);
+            } else {
+                self.inner.local_memory_access.insert_record(addr + i as u64 * 8, *record);
+            }
+        }
+
+        (records, page_prot_records)
+    }
+
+    fn mw_without_prot(&mut self, addr: u64) -> MemoryWriteRecord {
+        let record = self.inner.mw_without_prot(addr);
+
+        if let Some(local_memory_access) = &mut self.inner.precompile_local_memory_access {
+            local_memory_access.insert_record(addr, record);
+        } else {
+            self.inner.local_memory_access.insert_record(addr, record);
+        }
+
+        record
     }
 }

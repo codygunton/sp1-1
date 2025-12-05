@@ -10,7 +10,12 @@ async fn main() {
     let stdin = SP1Stdin::new();
 
     let client = ProverClient::from_env().await;
-    let (_public_values, report) = client.execute(ELF, stdin).await.expect("failed to prove");
 
+    let (_public_values, report) = client.execute(ELF, stdin.clone()).await.expect("failed to prove");
     println!("executed: {}", report);
+
+    let pk = client.setup(ELF).await.expect("setup failed");
+    let proof = client.prove(&pk, stdin).core().await.expect("proving failed");
+
+    client.verify(&proof, pk.verifying_key(), None).expect("verification failed");
 }

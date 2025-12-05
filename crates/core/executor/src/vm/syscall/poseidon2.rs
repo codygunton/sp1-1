@@ -14,22 +14,26 @@ pub(crate) fn poseidon2<'a, RT: SyscallRuntime<'a>>(
     assert!(arg1.is_multiple_of(8));
 
     let clk = rt.core().clk();
+
     let ptr = arg1;
 
     // Read the input values using unsafe read (since we'll overwrite them)
     let _ = rt.mr_slice_unsafe(8);
 
     // Write the computed results from memory records
-    let output_memory_records = rt.mw_slice(ptr, 8);
+    let (output_memory_records, output_page_prot_records) = rt.mw_slice(ptr, 8);
 
     if RT::TRACING {
+        let (local_mem_access, local_page_prot_access) = rt.postprocess_precompile();
+
         // Create and add the event
         let event = PrecompileEvent::POSEIDON2(Poseidon2PrecompileEvent {
             clk,
             ptr,
             memory_records: output_memory_records,
-            local_mem_access: rt.postprocess_precompile(),
-            ..Default::default()
+            local_mem_access,
+            page_prot_records: output_page_prot_records,
+            local_page_prot_access,
         });
 
         let syscall_event = rt.syscall_event(
