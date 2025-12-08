@@ -78,6 +78,7 @@ impl BuildToolchainCmd {
         Command::new("python3")
             .env("RUST_TARGET_PATH", &temp_dir)
             .env("CARGO_TARGET_RISCV32IM_SUCCINCT_ZKVM_ELF_RUSTFLAGS", "-Cpasses=lower-atomic")
+            .env("CARGO_TARGET_RISCV64IM_SUCCINCT_ZKVM_ELF_RUSTFLAGS", "-Cpasses=lower-atomic")
             .args([
                 "x.py",
                 "build",
@@ -86,7 +87,10 @@ impl BuildToolchainCmd {
                 "compiler/rustc",
                 "library",
                 "--target",
-                &format!("riscv32im-succinct-zkvm-elf,{}", get_target()),
+                &format!(
+                    "riscv32im-succinct-zkvm-elf,riscv64im-succinct-zkvm-elf,{}",
+                    get_target()
+                ),
             ])
             .current_dir(&rust_dir)
             .run()?;
