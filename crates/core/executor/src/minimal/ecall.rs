@@ -1,6 +1,7 @@
 use crate::syscalls::SyscallCode;
 
 use super::{
+    debug::{delete_profile_symbols_syscall, dump_elf_syscall, insert_profile_symbols_syscall},
     hint::{hint_len, hint_read},
     precompiles::{
         edwards::{edwards_add, edwards_decompress_syscall},
@@ -154,6 +155,9 @@ pub fn ecall_handler(ctx: &mut impl SyscallContext, code: SyscallCode) -> u64 {
             None
         }
         SyscallCode::MPROTECT => mprotect_syscall(ctx, arg1, arg2),
+        SyscallCode::DUMP_ELF => dump_elf_syscall(ctx, arg1, arg2),
+        SyscallCode::INSERT_PROFILER_SYMBOLS => insert_profile_symbols_syscall(ctx, arg1, arg2),
+        SyscallCode::DELETE_PROFILER_SYMBOLS => delete_profile_symbols_syscall(ctx, arg1, arg2),
         SyscallCode::VERIFY_SP1_PROOF
         | SyscallCode::COMMIT
         | SyscallCode::COMMIT_DEFERRED_PROOFS => None,

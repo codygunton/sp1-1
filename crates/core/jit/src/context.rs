@@ -1,4 +1,4 @@
-use crate::{debug, MemValue, RiscRegister, TraceChunkHeader};
+use crate::{debug, ElfInfo, MemValue, PageProtValue, RiscRegister, TraceChunkHeader};
 use memmap2::{MmapMut, MmapOptions};
 use std::{collections::VecDeque, io, os::fd::RawFd, ptr::NonNull, sync::mpsc};
 
@@ -43,6 +43,22 @@ pub trait SyscallContext {
     fn set_exit_code(&mut self, exit_code: u32);
     /// Returns if were in unconstrained mode.
     fn is_unconstrained(&self) -> bool;
+
+    /// Fetch loaded ELF information
+    fn elf_info(&self) -> ElfInfo;
+    /// Iterate throgh all initialized addresses
+    fn init_addr_iter(&self) -> impl IntoIterator<Item = u64>;
+    /// Iterate throgh all non-default page permissions
+    fn page_prot_iter(&self) -> impl IntoIterator<Item = (&u64, &PageProtValue)>;
+    /// Dump all profiler data for dump-elf / bootloader use. This includes:
+    /// * All known function symbols, including parsed symbols from ELF, and
+    ///   dynamically added ones.
+    /// * Current profiler stack.
+    fn maybe_dump_profiler_data(&self) -> (Vec<(String, u64, u64)>, Vec<u64>);
+    /// Insert function symbols in profiler mode
+    fn maybe_insert_profiler_symbols<I: Iterator<Item = (String, u64, u64)>>(&mut self, iter: I);
+    /// Delete function symbols in profiler mode
+    fn maybe_delete_profiler_symbols<I: Iterator<Item = u64>>(&mut self, iter: I);
 }
 
 impl SyscallContext for JitContext {
@@ -181,6 +197,30 @@ impl SyscallContext for JitContext {
 
     fn is_unconstrained(&self) -> bool {
         self.is_unconstrained == 1
+    }
+
+    fn elf_info(&self) -> ElfInfo {
+        unimplemented!()
+    }
+
+    fn init_addr_iter(&self) -> impl IntoIterator<Item = u64> {
+        Vec::new()
+    }
+
+    fn page_prot_iter(&self) -> impl IntoIterator<Item = (&u64, &PageProtValue)> {
+        Vec::new()
+    }
+
+    fn maybe_dump_profiler_data(&self) -> (Vec<(String, u64, u64)>, Vec<u64>) {
+        unimplemented!()
+    }
+
+    fn maybe_insert_profiler_symbols<I: Iterator<Item = (String, u64, u64)>>(&mut self, _iter: I) {
+        unimplemented!()
+    }
+
+    fn maybe_delete_profiler_symbols<I: Iterator<Item = u64>>(&mut self, _iter: I) {
+        unimplemented!()
     }
 }
 

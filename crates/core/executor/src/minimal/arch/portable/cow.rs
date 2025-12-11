@@ -57,6 +57,14 @@ impl<T: Copy> MaybeCowMemory<T> {
         }
     }
 
+    /// Get a view of the keys of the memory.
+    pub fn keys(&self) -> impl Iterator<Item = u64> + '_ {
+        match self {
+            Self::Cow { copy: _, original: _ } => unreachable!("Can't get keys of a cow memory"),
+            Self::Owned { memory } => memory.keys(),
+        }
+    }
+
     /// Get an entry for the given address.
     pub fn entry(&mut self, addr: u64) -> Entry<'_, T> {
         assert!(addr.is_multiple_of(8), "Address must be a multiple of 8");

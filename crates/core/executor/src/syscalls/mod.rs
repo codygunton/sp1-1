@@ -147,5 +147,10 @@ pub fn get_syscall<'a, 'b, E: ExecutorConfig>(
         SyscallCode::U256XU2048_MUL => Ok(Syscall::new(u256x2048_mul)),
         SyscallCode::MPROTECT => Ok(Syscall::new(mprotect_syscall)),
         SyscallCode::POSEIDON2 => Ok(Syscall::new(poseidon2_syscall)),
+        SyscallCode::DUMP_ELF
+        | SyscallCode::INSERT_PROFILER_SYMBOLS
+        | SyscallCode::DELETE_PROFILER_SYMBOLS => {
+            panic!("Debug syscalls are only implemented in MinimalExecutor!")
+        }
     }
 }

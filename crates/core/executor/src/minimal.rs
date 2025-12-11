@@ -4,6 +4,7 @@ pub use postprocess::chunked_memory_init_events;
 pub use sp1_jit::TraceChunkRaw;
 
 mod arch;
+mod debug;
 mod ecall;
 mod hint;
 mod postprocess;

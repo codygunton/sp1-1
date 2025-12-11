@@ -46,6 +46,16 @@ pub(crate) const EMBEDDED_RESERVED_INPUT_START: usize =
 #[cfg(all(target_os = "zkvm", not(feature = "bump")))]
 static mut EMBEDDED_RESERVED_INPUT_PTR: usize = EMBEDDED_RESERVED_INPUT_START;
 
+// While the following are not needed by bump feature, dump_elf requires them
+// to be available. We are only defining them as placeholders here, so we can
+// simplify inline assembly code for dump_elf.
+
+#[cfg(all(target_os = "zkvm", feature = "bump", feature = "may_dump_elf"))]
+pub(crate) const EMBEDDED_RESERVED_INPUT_START: usize = usize::MAX;
+
+#[cfg(all(target_os = "zkvm", feature = "bump", feature = "may_dump_elf"))]
+static mut EMBEDDED_RESERVED_INPUT_PTR: usize = usize::MAX;
+
 #[repr(C)]
 pub struct ReadVecResult {
     pub ptr: *mut u8,
@@ -133,7 +143,8 @@ mod zkvm {
     use cfg_if::cfg_if;
     use sha2::{Digest, Sha256};
     use sp1_primitives::consts::{
-        NOTE_DESC_HEADER, NOTE_DESC_SIZE, NOTE_UNTRUSTED_PROGRAM_ENABLED,
+        NOTE_DESC_HEADER, NOTE_DESC_PADDING_SIZE, NOTE_DESC_SIZE, NOTE_NAME,
+        NOTE_NAME_PADDING_SIZE, NOTE_UNTRUSTED_PROGRAM_ENABLED,
     };
 
     cfg_if! {
@@ -167,12 +178,6 @@ mod zkvm {
         }
     }
 
-    /// The ELF note values.
-    const NAME: [u8; 9] = *b"SUCCINCT\0";
-    const NAME_SIZE: usize = NAME.len();
-    const NAME_PADDING_SIZE: usize = (4 - NAME_SIZE % 4) % 4;
-    const DESC_PADDING_SIZE: usize = (4 - NOTE_DESC_SIZE % 4) % 4;
-
     // Note will be written in host platform outside of SP1 VM, skipping
     // alignment is actually fine.
     #[repr(packed)]
@@ -180,12 +185,12 @@ mod zkvm {
         namesz: [u8; 4],
         descsz: [u8; 4],
         type_: [u8; 4],
-        name: [u8; NAME_SIZE],
-        name_padding: [u8; NAME_PADDING_SIZE],
+        name: [u8; NOTE_NAME.len()],
+        name_padding: [u8; NOTE_NAME_PADDING_SIZE],
         desc_header: [u8; NOTE_DESC_HEADER.len()],
         heap_start: *const u8,
         heap_end: [u8; 8],
-        desc_padding: [u8; DESC_PADDING_SIZE],
+        desc_padding: [u8; NOTE_DESC_PADDING_SIZE],
     }
     // SAFETY: SP1 is single threaded so this is safe, in addition,
     // we don't really access the note section from Rust. This is really
@@ -196,16 +201,16 @@ mod zkvm {
     #[link_section = ".note.succinct"]
     #[used]
     pub static ELF_NOTE: NoteSection = NoteSection {
-        namesz: (NAME_SIZE as u32).to_le_bytes(),
+        namesz: (NOTE_NAME.len() as u32).to_le_bytes(),
         descsz: (NOTE_DESC_SIZE as u32).to_le_bytes(),
         type_: (NOTE_UNTRUSTED_PROGRAM_ENABLED as u32).to_le_bytes(),
-        name: NAME,
-        name_padding: [0u8; NAME_PADDING_SIZE],
+        name: NOTE_NAME,
+        name_padding: [0u8; NOTE_NAME_PADDING_SIZE],
         desc_header: NOTE_DESC_HEADER,
         // The linker should use target encoding, so we should be fine here.
         heap_start: std::ptr::addr_of!(_end) as *const u8,
         heap_end: HEAP_END.to_le_bytes(),
-        desc_padding: [0u8; DESC_PADDING_SIZE],
+        desc_padding: [0u8; NOTE_DESC_PADDING_SIZE],
     };
 
     #[no_mangle]
@@ -241,7 +246,13 @@ mod zkvm {
     core::arch::global_asm!(include_str!("memcpy.s"));
 
     // Alias the stack top to a static we can load easily.
+    #[cfg(not(feature = "may_dump_elf"))]
     static _STACK_TOP: u64 = sp1_primitives::consts::STACK_TOP;
+    // Programs which might dump elf has an extra stack region.
+    #[cfg(feature = "may_dump_elf")]
+    static _STACK_TOP: u64 =
+        sp1_primitives::consts::STACK_TOP + sp1_primitives::consts::DUMP_ELF_EXTRA_STACK;
+
     core::arch::global_asm!(
         r#"
     .section .text._start;

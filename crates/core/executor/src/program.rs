@@ -48,6 +48,8 @@ pub struct Program {
     /// The memory region where untrusted program could live in. It is also the
     /// memory region mprotect works on.
     pub untrusted_memory: Option<(u64, u64)>,
+    /// Stacktrace from a dump-elf / bootloader session
+    pub dump_elf_stack: Vec<u64>,
 }
 
 impl Program {
@@ -68,6 +70,7 @@ impl Program {
             enable_untrusted_programs: false,
             function_symbols: Vec::new(),
             untrusted_memory: None,
+            dump_elf_stack: Vec::new(),
         }
     }
 
@@ -112,6 +115,7 @@ impl Program {
             enable_untrusted_programs,
             function_symbols: elf.function_symbols,
             untrusted_memory: elf.untrusted_memory,
+            dump_elf_stack: elf.dump_elf_stack,
         })
     }
 
