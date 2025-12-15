@@ -45,7 +45,7 @@ pub struct MinimalExecutor {
     maybe_unconstrained: Option<UnconstrainedCtx>,
     debug_sender: Option<mpsc::SyncSender<Option<debug::State>>>,
     transpiler: InstructionTranspiler,
-    decoded_instruction_cache: HashMap<u64, Instruction>,
+    decoded_instruction_cache: HashMap<u32, Instruction>,
     #[cfg(feature = "profiling")]
     profiler: Option<(crate::profiler::Profiler, std::io::BufWriter<std::fs::File>)>,
 }
@@ -494,15 +494,16 @@ impl MinimalExecutor {
             let instruction_value: u32 =
                 (memory_value >> (aligned_offset * 8) & 0xffffffff).try_into().unwrap();
 
-            let instruction =
-                if let Some(cached_instruction) = self.decoded_instruction_cache.get(&self.pc) {
-                    *cached_instruction
-                } else {
-                    let instruction =
-                        process_instruction(&mut self.transpiler, instruction_value).unwrap();
-                    self.decoded_instruction_cache.insert(self.pc, instruction);
-                    instruction
-                };
+            let instruction = if let Some(cached_instruction) =
+                self.decoded_instruction_cache.get(&instruction_value)
+            {
+                *cached_instruction
+            } else {
+                let instruction =
+                    process_instruction(&mut self.transpiler, instruction_value).unwrap();
+                self.decoded_instruction_cache.insert(instruction_value, instruction);
+                instruction
+            };
             Some(instruction)
         } else {
             None
