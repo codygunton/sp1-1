@@ -102,6 +102,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "reinstantiate when vk root for mprotect is added"]
     async fn test_light_node() {
         setup_logger();
 
