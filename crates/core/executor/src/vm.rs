@@ -65,7 +65,7 @@ pub struct CoreVM<'a> {
     /// The transpiler of the program
     transpiler: InstructionTranspiler,
     /// Decoded instruction cache
-    decoded_instruction_cache: HashMap<u64, Instruction>,
+    decoded_instruction_cache: HashMap<u32, Instruction>,
 }
 
 impl<'a> CoreVM<'a> {
@@ -148,15 +148,16 @@ impl<'a> CoreVM<'a> {
             let aligned_offset = self.pc - aligned_pc;
             let instruction_value: u32 =
                 (word >> (aligned_offset * 8) & 0xffffffff).try_into().unwrap();
-            let instruction =
-                if let Some(cached_instruction) = self.decoded_instruction_cache.get(&self.pc) {
-                    *cached_instruction
-                } else {
-                    let instruction =
-                        process_instruction(&mut self.transpiler, instruction_value).unwrap();
-                    self.decoded_instruction_cache.insert(self.pc, instruction);
-                    instruction
-                };
+            let instruction = if let Some(cached_instruction) =
+                self.decoded_instruction_cache.get(&instruction_value)
+            {
+                *cached_instruction
+            } else {
+                let instruction =
+                    process_instruction(&mut self.transpiler, instruction_value).unwrap();
+                self.decoded_instruction_cache.insert(instruction_value, instruction);
+                instruction
+            };
             Ok(FetchResult {
                 pc: self.pc,
                 instruction: Some(instruction),
