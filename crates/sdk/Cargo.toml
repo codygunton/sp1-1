@@ -18,6 +18,7 @@ async-trait = { version = "0.1.81", optional = true }
 reqwest-middleware = { version = "0.3.2", optional = true }
 reqwest = { version = "0.12.12", default-features = false, features = [
   "rustls-tls",
+  "rustls-tls-webpki-roots",
   "trust-dns",
   "stream",
   "json",
@@ -50,7 +51,7 @@ sp1-core-executor = { workspace = true }
 sp1-stark = { workspace = true }
 sp1-primitives = { workspace = true }
 itertools = { workspace = true }
-tonic = { version = "0.12", features = ["tls", "tls-roots"], optional = true }
+tonic = { version = "0.12", features = ["tls", "tls-webpki-roots"], optional = true }
 alloy-signer = { version = "1.0", default-features = false, optional = true }
 alloy-signer-aws = { version = "1.0", default-features = false, optional = true }
 alloy-signer-local = { version = "1.0", default-features = false, optional = true }
