@@ -176,6 +176,17 @@ pub enum SyscallCode {
 
     /// Executes the `SIG_RETURN` syscall.
     SIG_RETURN = 0x00_00_01_34,
+
+    /// Debug syscalls, those shall only work in `MinimalExecutor`. `CoreVM` ignores them.
+    // `DE` is short for debug.
+    /// Executes the `DUMP_ELF` syscall.
+    DUMP_ELF = 0x00_DE_00_01,
+
+    /// Executes the `INSERT_PROFILER_SYMBOLS` syscall.
+    INSERT_PROFILER_SYMBOLS = 0x00_DE_00_02,
+
+    /// Executes the `DELETE_PROFILER_SYMBOLS` syscall.
+    DELETE_PROFILER_SYMBOLS = 0x00_DE_00_03,
 }
 
 impl SyscallCode {
@@ -228,6 +239,9 @@ impl SyscallCode {
             0x00_00_01_32 => SyscallCode::MPROTECT,
             0x00_00_01_33 => SyscallCode::POSEIDON2,
             0x00_00_01_34 => SyscallCode::SIG_RETURN,
+            0x00_DE_00_01 => SyscallCode::DUMP_ELF,
+            0x00_DE_00_02 => SyscallCode::INSERT_PROFILER_SYMBOLS,
+            0x00_DE_00_03 => SyscallCode::DELETE_PROFILER_SYMBOLS,
             _ => panic!("invalid syscall number: {value}"),
         }
     }
@@ -339,7 +353,10 @@ impl SyscallCode {
             | SyscallCode::COMMIT_DEFERRED_PROOFS
             | SyscallCode::VERIFY_SP1_PROOF
             | SyscallCode::HINT_LEN
-            | SyscallCode::HINT_READ => return None,
+            | SyscallCode::HINT_READ
+            | SyscallCode::DUMP_ELF
+            | SyscallCode::INSERT_PROFILER_SYMBOLS
+            | SyscallCode::DELETE_PROFILER_SYMBOLS => return None,
         })
     }
 
@@ -393,7 +410,10 @@ impl SyscallCode {
             | SyscallCode::COMMIT_DEFERRED_PROOFS
             | SyscallCode::VERIFY_SP1_PROOF
             | SyscallCode::HINT_LEN
-            | SyscallCode::HINT_READ => return None,
+            | SyscallCode::HINT_READ
+            | SyscallCode::DUMP_ELF
+            | SyscallCode::INSERT_PROFILER_SYMBOLS
+            | SyscallCode::DELETE_PROFILER_SYMBOLS => return None,
         })
     }
 

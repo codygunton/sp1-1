@@ -112,6 +112,15 @@ impl From<u64> for RiscOperand {
     }
 }
 
+/// Basic elf information. It extracts information from Program, but
+/// does not introduce dependency on Program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ElfInfo {
+    pub pc_base: u64,
+    pub instruction_count: usize,
+    pub untrusted_memory: Option<(u64, u64)>,
+}
+
 #[repr(C)]
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MemValue {

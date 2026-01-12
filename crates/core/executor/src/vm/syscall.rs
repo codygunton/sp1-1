@@ -431,7 +431,10 @@ pub(crate) fn sp1_ecall_handler<'a, RT: SyscallRuntime<'a>>(
         | SyscallCode::WRITE
         | SyscallCode::ENTER_UNCONSTRAINED
         | SyscallCode::EXIT_UNCONSTRAINED
-        | SyscallCode::HINT_READ => Ok(None),
+        | SyscallCode::HINT_READ
+        | SyscallCode::DUMP_ELF
+        | SyscallCode::INSERT_PROFILER_SYMBOLS
+        | SyscallCode::DELETE_PROFILER_SYMBOLS => Ok(None),
         code @ (SyscallCode::SECP256K1_DECOMPRESS
         | SyscallCode::BLS12381_DECOMPRESS
         | SyscallCode::SECP256R1_DECOMPRESS) => {
