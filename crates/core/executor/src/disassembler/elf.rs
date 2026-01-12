@@ -10,7 +10,7 @@ use eyre::OptionExt;
 use hashbrown::HashMap;
 use sp1_primitives::consts::{
     INSTRUCTION_WORD_SIZE, MAXIMUM_MEMORY_SIZE, NOTE_DESC_HEADER, NOTE_DESC_SIZE,
-    NOTE_UNTRUSTED_PROGRAM_ENABLED, PAGE_SIZE, STACK_TOP,
+    NOTE_UNTRUSTED_PROGRAM_ENABLED, PAGE_SIZE, PF_UNTRUSTED, STACK_TOP,
 };
 
 pub const TRAP_CONTEXT_SYMBOL: &str = "__SUCCINCT_TRAP_CONTEXT";
@@ -45,6 +45,8 @@ pub(crate) struct Elf {
     /// The memory region where untrusted program could live in. It is also the
     /// memory region mprotect works on.
     pub(crate) untrusted_memory: Option<(u64, u64)>,
+    /// Stacktrace from a dump-elf / bootloader session
+    pub(crate) dump_elf_stack: Vec<u64>,
 }
 
 impl Elf {
@@ -59,6 +61,7 @@ impl Elf {
         page_prot_image: HashMap<u64, u8>,
         function_symbols: Vec<(String, u64, u64)>,
         untrusted_memory: Option<(u64, u64)>,
+        dump_elf_stack: Vec<u64>,
     ) -> Self {
         Self {
             instructions,
@@ -69,6 +72,7 @@ impl Elf {
             page_prot_image,
             function_symbols,
             untrusted_memory,
+            dump_elf_stack,
         }
     }
 
@@ -181,6 +185,37 @@ impl Elf {
                     .collect()
             });
 
+        #[cfg(not(feature = "profiling"))]
+        let dump_elf_stack = Vec::new();
+
+        #[cfg(feature = "profiling")]
+        let dump_elf_stack = elf
+            .section_headers_with_strtab()
+            .ok()
+            .and_then(|(section_headers_table, string_table)| {
+                match (section_headers_table, string_table) {
+                    (Some(section_headers_table), Some(string_table)) => {
+                        Some((section_headers_table, string_table))
+                    }
+                    _ => None,
+                }
+            })
+            .and_then(|(section_headers_table, string_table)| {
+                section_headers_table.iter().find(|section_header| {
+                    if let Ok(name) = string_table.get(section_header.sh_name as usize) {
+                        name == sp1_primitives::consts::PROFILER_STACK_CUSTOM_SECTION_NAME
+                    } else {
+                        false
+                    }
+                })
+            })
+            .and_then(|section| {
+                let binary = &input[(section.sh_offset as usize)
+                    ..((section.sh_offset + section.sh_size) as usize)];
+                bincode::deserialize(binary).ok()
+            })
+            .unwrap_or_else(Default::default);
+
         Ok(Elf::new(
             instructions,
             entry,
@@ -190,6 +225,7 @@ impl Elf {
             page_prot_image,
             function_symbols,
             untrusted_memory,
+            dump_elf_stack,
         ))
     }
 
@@ -218,8 +254,9 @@ impl Elf {
         let offset = segment.p_offset;
 
         let is_execute = (segment.p_flags & PF_X) != 0;
+        let is_trusted = is_execute && ((segment.p_flags & PF_UNTRUSTED) == 0);
 
-        if is_execute && base_address.is_none() {
+        if is_trusted && base_address.is_none() {
             *base_address = Some(vaddr);
         }
 
@@ -258,7 +295,7 @@ impl Elf {
 
         let last_addr = Some(vaddr.checked_add(mem_size).ok_or_eyre("last addr overflow")?);
 
-        if (segment.p_flags & PF_X) != 0 {
+        if is_trusted {
             if base_address.is_none() {
                 *base_address = Some(vaddr);
                 eyre::ensure!(
@@ -310,7 +347,7 @@ impl Elf {
                     })
                     .or_insert_with(|| word << 32);
             }
-            if is_execute {
+            if is_trusted {
                 instructions.push(word as u32);
             }
         }
@@ -320,7 +357,7 @@ impl Elf {
 
         for page_start_addr in (page_start_addr..end).step_by(PAGE_SIZE) {
             let page_idx = page_start_addr / PAGE_SIZE as u64;
-            page_prot_image.insert(page_idx, segment.p_flags.try_into().unwrap());
+            page_prot_image.insert(page_idx, segment.p_flags as u8);
         }
 
         Ok(last_addr)

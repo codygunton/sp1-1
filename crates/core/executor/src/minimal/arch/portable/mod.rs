@@ -2,7 +2,7 @@
 
 use sp1_jit::{
     debug::{self, DebugState},
-    Interrupt, MemValue, PageProtValue, RiscRegister, SyscallContext, TraceChunkHeader,
+    ElfInfo, Interrupt, MemValue, PageProtValue, RiscRegister, SyscallContext, TraceChunkHeader,
     TraceChunkRaw,
 };
 
@@ -260,6 +260,53 @@ impl SyscallContext for MinimalExecutor {
             *self.invocation_tracker.entry(name.to_string()).or_insert(0) += 1;
             (cycles, depth)
         })
+    }
+
+    fn elf_info(&self) -> ElfInfo {
+        ElfInfo {
+            pc_base: self.program.pc_base,
+            instruction_count: self.program.instructions.len(),
+            untrusted_memory: self.program.untrusted_memory,
+        }
+    }
+
+    fn init_addr_iter(&self) -> impl IntoIterator<Item = u64> {
+        self.memory.keys()
+    }
+
+    fn page_prot_iter(&self) -> impl IntoIterator<Item = (&u64, &PageProtValue)> {
+        self.page_prots
+            .keys()
+            .filter_map(|page_idx| self.page_prots.get(*page_idx).map(|prot| (page_idx, prot)))
+    }
+
+    fn maybe_dump_profiler_data(&self) -> (Vec<(String, u64, u64)>, Vec<u64>) {
+        #[cfg(feature = "profiling")]
+        if let Some((ref profiler, _)) = self.profiler {
+            return profiler.dump();
+        }
+
+        (self.program.function_symbols.clone(), self.program.dump_elf_stack.clone())
+    }
+
+    #[allow(unused_variables)]
+    fn maybe_insert_profiler_symbols<I: Iterator<Item = (String, u64, u64)>>(&mut self, iter: I) {
+        #[cfg(feature = "profiling")]
+        if let Some((ref mut profiler, _)) = self.profiler {
+            for (name, addr, len) in iter {
+                profiler.insert(&name, addr, len);
+            }
+        }
+    }
+
+    #[allow(unused_variables)]
+    fn maybe_delete_profiler_symbols<I: Iterator<Item = u64>>(&mut self, iter: I) {
+        #[cfg(feature = "profiling")]
+        if let Some((ref mut profiler, _)) = self.profiler {
+            for addr in iter {
+                profiler.delete(addr);
+            }
+        }
     }
 }
 

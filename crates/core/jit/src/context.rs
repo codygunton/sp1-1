@@ -1,4 +1,4 @@
-use crate::{debug, Interrupt, MemValue, RiscRegister, TraceChunkHeader};
+use crate::{debug, ElfInfo, Interrupt, MemValue, PageProtValue, RiscRegister, TraceChunkHeader};
 use memmap2::{MmapMut, MmapOptions};
 use sp1_primitives::consts::{PROT_READ, PROT_WRITE};
 use std::{collections::VecDeque, io, os::fd::RawFd, ptr::NonNull, sync::mpsc};
@@ -100,6 +100,22 @@ pub trait SyscallContext {
     /// Returns (cycles_elapsed, depth) or None if no matching start.
     #[cfg(feature = "profiling")]
     fn cycle_tracker_report_end(&mut self, name: &str) -> Option<(u64, u32)>;
+
+    /// Fetch loaded ELF information
+    fn elf_info(&self) -> ElfInfo;
+    /// Iterate throgh all initialized addresses
+    fn init_addr_iter(&self) -> impl IntoIterator<Item = u64>;
+    /// Iterate throgh all non-default page permissions
+    fn page_prot_iter(&self) -> impl IntoIterator<Item = (&u64, &PageProtValue)>;
+    /// Dump all profiler data for dump-elf / bootloader use. This includes:
+    /// * All known function symbols, including parsed symbols from ELF, and
+    ///   dynamically added ones.
+    /// * Current profiler stack.
+    fn maybe_dump_profiler_data(&self) -> (Vec<(String, u64, u64)>, Vec<u64>);
+    /// Insert function symbols in profiler mode
+    fn maybe_insert_profiler_symbols<I: Iterator<Item = (String, u64, u64)>>(&mut self, iter: I);
+    /// Delete function symbols in profiler mode
+    fn maybe_delete_profiler_symbols<I: Iterator<Item = u64>>(&mut self, iter: I);
 }
 
 impl SyscallContext for JitContext {
@@ -280,6 +296,30 @@ impl SyscallContext for JitContext {
         // JitContext is not used when profiling is enabled (portable executor is used instead).
         // This is a no-op implementation for trait completeness.
         None
+    }
+
+    fn elf_info(&self) -> ElfInfo {
+        unimplemented!()
+    }
+
+    fn init_addr_iter(&self) -> impl IntoIterator<Item = u64> {
+        Vec::new()
+    }
+
+    fn page_prot_iter(&self) -> impl IntoIterator<Item = (&u64, &PageProtValue)> {
+        Vec::new()
+    }
+
+    fn maybe_dump_profiler_data(&self) -> (Vec<(String, u64, u64)>, Vec<u64>) {
+        unimplemented!()
+    }
+
+    fn maybe_insert_profiler_symbols<I: Iterator<Item = (String, u64, u64)>>(&mut self, _iter: I) {
+        unimplemented!()
+    }
+
+    fn maybe_delete_profiler_symbols<I: Iterator<Item = u64>>(&mut self, _iter: I) {
+        unimplemented!()
     }
 }
 
