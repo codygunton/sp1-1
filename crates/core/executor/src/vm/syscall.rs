@@ -404,6 +404,7 @@ pub(crate) fn sp1_ecall_handler<'a, M: ExecutionMode, RT: SyscallRuntime<'a, M>>
         | SyscallCode::ENTER_UNCONSTRAINED
         | SyscallCode::EXIT_UNCONSTRAINED
         | SyscallCode::HINT_READ
+        | SyscallCode::HINT_MPROTECT_FLUSH
         | SyscallCode::DUMP_ELF
         | SyscallCode::INSERT_PROFILER_SYMBOLS
         | SyscallCode::DELETE_PROFILER_SYMBOLS => Ok(None),

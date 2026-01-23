@@ -179,13 +179,17 @@ pub const UINT256_MUL_CARRY: u32 = 0x00_01_01_31;
 #[allow(clippy::mistyped_literal_suffixes)]
 pub const MPROTECT: u32 = 0x00_00_01_32;
 
+/// Executes the `HINT_MPROTECT_FLUSH` syscall.
+#[allow(clippy::mistyped_literal_suffixes)]
+pub const HINT_MPROTECT_FLUSH: u32 = 0x00_00_00_35;
+
 pub const POSEIDON2: u32 = 0x00_00_01_33;
 
 /// Executes the `DUMP_ELF` syscall
-pub const DUMP_ELF: u32 = 0x00_DE_00_01;
+pub const DUMP_ELF: u32 = 0x00_00_00_40;
 
 /// Executes the `INSERT_PROFILER_SYMBOLS` syscall
-pub const INSERT_PROFILER_SYMBOLS: u32 = 0x00_DE_00_02;
+pub const INSERT_PROFILER_SYMBOLS: u32 = 0x00_00_00_41;
 
 /// Executes the `DELETE_PROFILER_SYMBOLS` syscall
-pub const DELETE_PROFILER_SYMBOLS: u32 = 0x00_DE_00_03;
+pub const DELETE_PROFILER_SYMBOLS: u32 = 0x00_00_00_42;

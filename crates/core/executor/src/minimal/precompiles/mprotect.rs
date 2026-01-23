@@ -18,3 +18,14 @@ pub fn mprotect_syscall(
 
     Ok(None)
 }
+
+#[allow(clippy::unnecessary_wraps)]
+pub fn mprotect_flush_syscall(
+    ctx: &mut impl SyscallContext,
+    _: u64,
+    _: u64,
+) -> Result<Option<u64>, Interrupt> {
+    ctx.page_prot_flush();
+
+    Ok(None)
+}

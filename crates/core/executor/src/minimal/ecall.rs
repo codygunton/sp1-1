@@ -7,7 +7,7 @@ use super::{
         edwards::{edwards_add, edwards_decompress_syscall},
         fptower::{fp2_addsub_syscall, fp2_mul_syscall, fp_op_syscall},
         keccak::keccak_permute,
-        mprotect::mprotect_syscall,
+        mprotect::{mprotect_flush_syscall, mprotect_syscall},
         poseidon2::poseidon2,
         sha256::{sha256_compress, sha256_extend},
         sig_return::sig_return_syscall,
@@ -165,6 +165,7 @@ pub fn ecall_handler(ctx: &mut impl SyscallContext, code: SyscallCode) -> Result
             Ok(None)
         }
         SyscallCode::MPROTECT => mprotect_syscall(ctx, arg1, arg2),
+        SyscallCode::HINT_MPROTECT_FLUSH => mprotect_flush_syscall(ctx, arg1, arg2),
         SyscallCode::SIG_RETURN => sig_return_syscall(ctx, arg1, arg2),
         SyscallCode::DUMP_ELF => Ok(dump_elf_syscall(ctx, arg1, arg2)),
         SyscallCode::INSERT_PROFILER_SYMBOLS => Ok(insert_profile_symbols_syscall(ctx, arg1, arg2)),
