@@ -53,6 +53,10 @@ pub trait SyscallContext {
     fn prot_slice_check(&mut self, addr: u64, len: usize, prot_bitmap: u8)
         -> Result<(), Interrupt>;
     fn page_prot_write(&mut self, addr: u64, val: u8);
+    /// Flush all page prot writes, by default this is a no-op. It will be used
+    /// in native executor to buffer permission changes so we can issue a number
+    /// of them in one single OS-level syscall.
+    fn page_prot_flush(&mut self) {}
     /// Get the input buffer
     fn input_buffer(&mut self) -> &mut VecDeque<Vec<u8>>;
     /// Get the public values stream.

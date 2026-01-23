@@ -171,6 +171,10 @@ pub enum SyscallCode {
     #[allow(clippy::mistyped_literal_suffixes)]
     MPROTECT = 0x00_00_01_32,
 
+    /// Executes the `HINT_MPROTECT_FLUSH` syscall.
+    #[allow(clippy::mistyped_literal_suffixes)]
+    HINT_MPROTECT_FLUSH = 0x00_00_00_35,
+
     /// Executes the `POSEIDON2` syscall.
     POSEIDON2 = 0x00_00_01_33,
 
@@ -178,15 +182,14 @@ pub enum SyscallCode {
     SIG_RETURN = 0x00_00_01_34,
 
     /// Debug syscalls, those shall only work in `MinimalExecutor`. `CoreVM` ignores them.
-    // `DE` is short for debug.
     /// Executes the `DUMP_ELF` syscall.
-    DUMP_ELF = 0x00_DE_00_01,
+    DUMP_ELF = 0x00_00_00_40,
 
     /// Executes the `INSERT_PROFILER_SYMBOLS` syscall.
-    INSERT_PROFILER_SYMBOLS = 0x00_DE_00_02,
+    INSERT_PROFILER_SYMBOLS = 0x00_00_00_41,
 
     /// Executes the `DELETE_PROFILER_SYMBOLS` syscall.
-    DELETE_PROFILER_SYMBOLS = 0x00_DE_00_03,
+    DELETE_PROFILER_SYMBOLS = 0x00_00_00_42,
 }
 
 impl SyscallCode {
@@ -237,11 +240,13 @@ impl SyscallCode {
             0x00_01_01_31 => SyscallCode::UINT256_MUL_CARRY,
             #[allow(clippy::mistyped_literal_suffixes)]
             0x00_00_01_32 => SyscallCode::MPROTECT,
+            #[allow(clippy::mistyped_literal_suffixes)]
+            0x00_00_00_35 => SyscallCode::HINT_MPROTECT_FLUSH,
             0x00_00_01_33 => SyscallCode::POSEIDON2,
             0x00_00_01_34 => SyscallCode::SIG_RETURN,
-            0x00_DE_00_01 => SyscallCode::DUMP_ELF,
-            0x00_DE_00_02 => SyscallCode::INSERT_PROFILER_SYMBOLS,
-            0x00_DE_00_03 => SyscallCode::DELETE_PROFILER_SYMBOLS,
+            0x00_00_00_40 => SyscallCode::DUMP_ELF,
+            0x00_00_00_41 => SyscallCode::INSERT_PROFILER_SYMBOLS,
+            0x00_00_00_42 => SyscallCode::DELETE_PROFILER_SYMBOLS,
             _ => panic!("invalid syscall number: {value}"),
         }
     }
@@ -363,6 +368,7 @@ impl SyscallCode {
             | SyscallCode::VERIFY_SP1_PROOF
             | SyscallCode::HINT_LEN
             | SyscallCode::HINT_READ
+            | SyscallCode::HINT_MPROTECT_FLUSH
             | SyscallCode::DUMP_ELF
             | SyscallCode::INSERT_PROFILER_SYMBOLS
             | SyscallCode::DELETE_PROFILER_SYMBOLS => return None,
@@ -420,6 +426,7 @@ impl SyscallCode {
             | SyscallCode::VERIFY_SP1_PROOF
             | SyscallCode::HINT_LEN
             | SyscallCode::HINT_READ
+            | SyscallCode::HINT_MPROTECT_FLUSH
             | SyscallCode::DUMP_ELF
             | SyscallCode::INSERT_PROFILER_SYMBOLS
             | SyscallCode::DELETE_PROFILER_SYMBOLS => return None,
