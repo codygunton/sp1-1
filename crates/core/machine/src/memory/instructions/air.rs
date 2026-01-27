@@ -32,14 +32,14 @@ where
         // turned on, as `is_real`, the sum of the eight selectors, is boolean. Therefore,
         // the `opcode` matches the corresponding opcode.
 
-        let is_real = local.is_lb +
-            local.is_lbu +
-            local.is_lh +
-            local.is_lhu +
-            local.is_lw +
-            local.is_sb +
-            local.is_sh +
-            local.is_sw;
+        let is_real = local.is_lb
+            + local.is_lbu
+            + local.is_lh
+            + local.is_lhu
+            + local.is_lw
+            + local.is_sb
+            + local.is_sh
+            + local.is_sw;
 
         builder.assert_bool(local.is_lb);
         builder.assert_bool(local.is_lbu);
@@ -94,14 +94,14 @@ impl MemoryInstructionsChip {
         &self,
         local: &MemoryInstructionsColumns<AB::Var>,
     ) -> AB::Expr {
-        local.is_lb * Opcode::LB.as_field::<AB::F>() +
-            local.is_lbu * Opcode::LBU.as_field::<AB::F>() +
-            local.is_lh * Opcode::LH.as_field::<AB::F>() +
-            local.is_lhu * Opcode::LHU.as_field::<AB::F>() +
-            local.is_lw * Opcode::LW.as_field::<AB::F>() +
-            local.is_sb * Opcode::SB.as_field::<AB::F>() +
-            local.is_sh * Opcode::SH.as_field::<AB::F>() +
-            local.is_sw * Opcode::SW.as_field::<AB::F>()
+        local.is_lb * Opcode::LB.as_field::<AB::F>()
+            + local.is_lbu * Opcode::LBU.as_field::<AB::F>()
+            + local.is_lh * Opcode::LH.as_field::<AB::F>()
+            + local.is_lhu * Opcode::LHU.as_field::<AB::F>()
+            + local.is_lw * Opcode::LW.as_field::<AB::F>()
+            + local.is_sb * Opcode::SB.as_field::<AB::F>()
+            + local.is_sh * Opcode::SH.as_field::<AB::F>()
+            + local.is_sw * Opcode::SW.as_field::<AB::F>()
     }
 
     /// Constrains the addr_aligned, addr_offset, and addr_word memory columns.
@@ -279,10 +279,10 @@ impl MemoryInstructionsChip {
         // If it's an unsigned instruction (LBU, LHU, LW), then `mem_value_is_pos = 1`.
         // If it's signed instruction (LB, LH), then `most_sig_bit` will be constrained correctly,
         // and same for `mem_value_is_pos`.
-        let mem_value_is_pos = (local.is_lb + local.is_lh) * (AB::Expr::one() - local.most_sig_bit) +
-            local.is_lbu +
-            local.is_lhu +
-            local.is_lw;
+        let mem_value_is_pos = (local.is_lb + local.is_lh) * (AB::Expr::one() - local.most_sig_bit)
+            + local.is_lbu
+            + local.is_lhu
+            + local.is_lw;
         builder.assert_eq(
             local.mem_value_is_pos_not_x0,
             mem_value_is_pos * (AB::Expr::one() - local.op_a_0),
@@ -319,14 +319,14 @@ impl MemoryInstructionsChip {
         let mem_val = *local.memory_access.value();
         let prev_mem_val = *local.memory_access.prev_value();
         let sb_expected_stored_value = Word([
-            a_val[0] * offset_is_zero.clone() +
-                (one.clone() - offset_is_zero.clone()) * prev_mem_val[0],
-            a_val[0] * local.ls_bits_is_one +
-                (one.clone() - local.ls_bits_is_one) * prev_mem_val[1],
-            a_val[0] * local.ls_bits_is_two +
-                (one.clone() - local.ls_bits_is_two) * prev_mem_val[2],
-            a_val[0] * local.ls_bits_is_three +
-                (one.clone() - local.ls_bits_is_three) * prev_mem_val[3],
+            a_val[0] * offset_is_zero.clone()
+                + (one.clone() - offset_is_zero.clone()) * prev_mem_val[0],
+            a_val[0] * local.ls_bits_is_one
+                + (one.clone() - local.ls_bits_is_one) * prev_mem_val[1],
+            a_val[0] * local.ls_bits_is_two
+                + (one.clone() - local.ls_bits_is_two) * prev_mem_val[2],
+            a_val[0] * local.ls_bits_is_three
+                + (one.clone() - local.ls_bits_is_three) * prev_mem_val[3],
         ]);
         builder
             .when(local.is_sb)
@@ -342,8 +342,8 @@ impl MemoryInstructionsChip {
         let a_is_lower_half = offset_is_zero;
         let a_is_upper_half = local.ls_bits_is_two;
         let sh_expected_stored_value = Word([
-            a_val[0] * a_is_lower_half.clone() +
-                (one.clone() - a_is_lower_half.clone()) * prev_mem_val[0],
+            a_val[0] * a_is_lower_half.clone()
+                + (one.clone() - a_is_lower_half.clone()) * prev_mem_val[0],
             a_val[1] * a_is_lower_half.clone() + (one.clone() - a_is_lower_half) * prev_mem_val[1],
             a_val[0] * a_is_upper_half + (one.clone() - a_is_upper_half) * prev_mem_val[2],
             a_val[1] * a_is_upper_half + (one.clone() - a_is_upper_half) * prev_mem_val[3],
@@ -374,10 +374,10 @@ impl MemoryInstructionsChip {
             AB::Expr::one() - local.ls_bits_is_one - local.ls_bits_is_two - local.ls_bits_is_three;
 
         // Compute the byte value.
-        let mem_byte = mem_val[0] * offset_is_zero.clone() +
-            mem_val[1] * local.ls_bits_is_one +
-            mem_val[2] * local.ls_bits_is_two +
-            mem_val[3] * local.ls_bits_is_three;
+        let mem_byte = mem_val[0] * offset_is_zero.clone()
+            + mem_val[1] * local.ls_bits_is_one
+            + mem_val[2] * local.ls_bits_is_two
+            + mem_val[3] * local.ls_bits_is_three;
         let byte_value = Word::extend_expr::<AB>(mem_byte.clone());
 
         // When the instruction is LB or LBU, just use the lower byte.
@@ -425,10 +425,10 @@ impl MemoryInstructionsChip {
 
         // Assert that only one of the value flags is true
         builder.assert_one(
-            offset_is_zero.clone() +
-                local.ls_bits_is_one +
-                local.ls_bits_is_two +
-                local.ls_bits_is_three,
+            offset_is_zero.clone()
+                + local.ls_bits_is_one
+                + local.ls_bits_is_two
+                + local.ls_bits_is_three,
         );
 
         // Assert that the correct value flag is set

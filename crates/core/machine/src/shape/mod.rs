@@ -193,9 +193,9 @@ impl<F: PrimeField32> CoreShapeConfig<F> {
                                 let mem_events_height = shape[2].1;
                                 let global_events_height = shape[3].1;
                                 if num_memory_local_events
-                                    .div_ceil(NUM_LOCAL_MEMORY_ENTRIES_PER_ROW) <=
-                                    (1 << mem_events_height) &&
-                                    num_global_events <= (1 << global_events_height)
+                                    .div_ceil(NUM_LOCAL_MEMORY_ENTRIES_PER_ROW)
+                                    <= (1 << mem_events_height)
+                                    && num_global_events <= (1 << global_events_height)
                                 {
                                     let mut actual_shape: Shape<RiscvAirId> = Shape::default();
                                     actual_shape.extend(
@@ -275,8 +275,8 @@ impl<F: PrimeField32> CoreShapeConfig<F> {
                     ),
                     (
                         RiscvAir::<F>::Global(GlobalChip).name(),
-                        ((2 * num_local_mem_events +
-                            (1 << allowed_log2_height).div_ceil(&air_id.rows_per_event()))
+                        ((2 * num_local_mem_events
+                            + (1 << allowed_log2_height).div_ceil(&air_id.rows_per_event()))
                         .next_power_of_two()
                         .ilog2() as usize)
                             .max(4),

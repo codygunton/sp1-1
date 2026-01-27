@@ -269,8 +269,8 @@ where
                 chips.iter().zip(opened_values.chips.iter()).for_each(|(chip, val)| {
                     max_lookup_mult = max_lookup_mult
                         .checked_add(
-                            (chip.num_sends_by_kind(kind) as u64 +
-                                chip.num_receives_by_kind(kind) as u64)
+                            (chip.num_sends_by_kind(kind) as u64
+                                + chip.num_receives_by_kind(kind) as u64)
                                 .checked_mul(1u64.checked_shl(val.log_degree as u32).unwrap())
                                 .unwrap(),
                         )

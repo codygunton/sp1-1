@@ -196,8 +196,8 @@ where
         builder.assert_bool(local.is_sub);
         builder.assert_bool(is_real.clone());
 
-        let opcode = AB::Expr::from_f(Opcode::ADD.as_field()) * local.is_add +
-            AB::Expr::from_f(Opcode::SUB.as_field()) * local.is_sub;
+        let opcode = AB::Expr::from_f(Opcode::ADD.as_field()) * local.is_add
+            + AB::Expr::from_f(Opcode::SUB.as_field()) * local.is_sub;
 
         // Evaluate the addition operation.
         // This is enforced only when `op_a_not_0 == 1`.
@@ -504,8 +504,8 @@ mod tests {
                 println!("Result for {opcode:?}: {result:?}");
                 let add_sub_chip_name = chip_name!(AddSubChip, BabyBear);
                 assert!(
-                    result.is_err() &&
-                        result.unwrap_err().is_constraints_failing(&add_sub_chip_name)
+                    result.is_err()
+                        && result.unwrap_err().is_constraints_failing(&add_sub_chip_name)
                 );
             }
         }

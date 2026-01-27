@@ -32,8 +32,8 @@ impl<F: PrimeField32> GlobalInteractionOperation<F> {
         is_receive: bool,
         kind: u8,
     ) -> (SepticCurve<F>, u8, [F; 16], [F; 16]) {
-        let x_start = SepticExtension::<F>::from_base_fn(|i| F::from_canonical_u32(values.0[i])) +
-            SepticExtension::from_base(F::from_canonical_u32((kind as u32) << 16));
+        let x_start = SepticExtension::<F>::from_base_fn(|i| F::from_canonical_u32(values.0[i]))
+            + SepticExtension::from_base(F::from_canonical_u32((kind as u32) << 16));
         let (point, offset, m_trial, m_hash) = SepticCurve::<F>::lift_x(x_start);
         if !is_receive {
             return (point.neg(), offset, m_trial, m_hash);

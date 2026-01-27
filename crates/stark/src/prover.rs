@@ -352,9 +352,9 @@ where
             let trace_height = traces[i].height();
             let prep_width = prep_traces[i].map_or(0, |x| x.width());
             let permutation_width = permutation_traces[i].width();
-            let total_width = trace_width +
-                prep_width +
-                permutation_width * <SC::Challenge as AbstractExtensionField<SC::Val>>::D;
+            let total_width = trace_width
+                + prep_width
+                + permutation_width * <SC::Challenge as AbstractExtensionField<SC::Val>>::D;
             tracing::debug!(
                 "{:<15} | Main Cols = {:<5} | Pre Cols = {:<5}  | Perm Cols = {:<5} | Rows = {:<5} | Cells = {:<10}",
                 chips[i].name(),
@@ -407,9 +407,8 @@ where
         // Compute the quotient values.
         let alpha: SC::Challenge = challenger.sample_ext_element::<SC::Challenge>();
         let parent_span = tracing::debug_span!("compute quotient values");
-        let quotient_values =
-            parent_span.in_scope(|| {
-                quotient_domains
+        let quotient_values = parent_span.in_scope(|| {
+            quotient_domains
                 .into_par_iter()
                 .enumerate()
                 .map(|(i, quotient_domain)| {
@@ -454,7 +453,7 @@ where
                         })
                 })
                 .collect::<Vec<_>>()
-            });
+        });
 
         // Split the quotient values and commit to them.
         let quotient_domains_and_chunks = quotient_domains

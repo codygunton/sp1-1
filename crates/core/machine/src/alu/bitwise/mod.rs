@@ -181,9 +181,9 @@ where
         let local: &BitwiseCols<AB::Var> = (*local).borrow();
 
         // Get the opcode for the operation.
-        let opcode = local.is_xor * ByteOpcode::XOR.as_field::<AB::F>() +
-            local.is_or * ByteOpcode::OR.as_field::<AB::F>() +
-            local.is_and * ByteOpcode::AND.as_field::<AB::F>();
+        let opcode = local.is_xor * ByteOpcode::XOR.as_field::<AB::F>()
+            + local.is_or * ByteOpcode::OR.as_field::<AB::F>()
+            + local.is_and * ByteOpcode::AND.as_field::<AB::F>();
 
         // Get a multiplicity of `1` only for a true row.
         let mult = local.is_xor + local.is_or + local.is_and;
@@ -196,9 +196,9 @@ where
         builder.when(local.op_a_not_0).assert_one(mult.clone());
 
         // Get the cpu opcode, which corresponds to the opcode being sent in the CPU table.
-        let cpu_opcode = local.is_xor * Opcode::XOR.as_field::<AB::F>() +
-            local.is_or * Opcode::OR.as_field::<AB::F>() +
-            local.is_and * Opcode::AND.as_field::<AB::F>();
+        let cpu_opcode = local.is_xor * Opcode::XOR.as_field::<AB::F>()
+            + local.is_or * Opcode::OR.as_field::<AB::F>()
+            + local.is_and * Opcode::AND.as_field::<AB::F>();
 
         // Receive the arguments.
         // SAFETY: This checks the following.

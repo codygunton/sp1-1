@@ -84,9 +84,9 @@ where
         let is_real = local.is_auipc + local.is_unimp + local.is_ebreak;
         builder.assert_bool(is_real.clone());
 
-        let opcode = AB::Expr::from_canonical_u32(Opcode::AUIPC as u32) * local.is_auipc +
-            AB::Expr::from_canonical_u32(Opcode::UNIMP as u32) * local.is_unimp +
-            AB::Expr::from_canonical_u32(Opcode::EBREAK as u32) * local.is_ebreak;
+        let opcode = AB::Expr::from_canonical_u32(Opcode::AUIPC as u32) * local.is_auipc
+            + AB::Expr::from_canonical_u32(Opcode::UNIMP as u32) * local.is_unimp
+            + AB::Expr::from_canonical_u32(Opcode::EBREAK as u32) * local.is_ebreak;
 
         // SAFETY: This checks the following.
         // - `next_pc = pc + 4`

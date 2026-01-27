@@ -487,8 +487,8 @@ impl<F: PrimeField32> RiscvAir<F> {
                 .iter()
                 .chain(chip.receives())
                 .filter(|interaction| {
-                    interaction.kind == InteractionKind::Memory &&
-                        interaction.scope == InteractionScope::Local
+                    interaction.kind == InteractionKind::Memory
+                        && interaction.scope == InteractionScope::Local
                 })
                 .count();
 

@@ -29,8 +29,8 @@ where
         let is_real = local.is_jal + local.is_jalr;
         builder.assert_bool(is_real.clone());
 
-        let opcode = local.is_jal * Opcode::JAL.as_field::<AB::F>() +
-            local.is_jalr * Opcode::JALR.as_field::<AB::F>();
+        let opcode = local.is_jal * Opcode::JAL.as_field::<AB::F>()
+            + local.is_jalr * Opcode::JALR.as_field::<AB::F>();
 
         // SAFETY: This checks the following.
         // - `num_extra_cycles = 0`

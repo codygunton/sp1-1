@@ -100,8 +100,8 @@ mod tests {
                 FailureType::ConstraintsFailing => {
                     let memory_instr_chip_name = chip_name!(MemoryInstructionsChip, BabyBear);
                     assert!(
-                        result.is_err() &&
-                            result.unwrap_err().is_constraints_failing(&memory_instr_chip_name)
+                        result.is_err()
+                            && result.unwrap_err().is_constraints_failing(&memory_instr_chip_name)
                     );
                 }
                 FailureType::CumulativeSumFailing => {
@@ -175,8 +175,8 @@ mod tests {
                 FailureType::ConstraintsFailing => {
                     let memory_instr_chip_name = chip_name!(MemoryInstructionsChip, BabyBear);
                     assert!(
-                        result.is_err() &&
-                            result.unwrap_err().is_constraints_failing(&memory_instr_chip_name)
+                        result.is_err()
+                            && result.unwrap_err().is_constraints_failing(&memory_instr_chip_name)
                     );
                 }
                 FailureType::CumulativeSumFailing => {

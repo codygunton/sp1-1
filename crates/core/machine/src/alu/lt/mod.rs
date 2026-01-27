@@ -450,8 +450,8 @@ where
             local.pc,
             local.pc + AB::Expr::from_canonical_u32(DEFAULT_PC_INC),
             AB::Expr::zero(),
-            local.is_slt * AB::F::from_canonical_u32(Opcode::SLT as u32) +
-                local.is_sltu * AB::F::from_canonical_u32(Opcode::SLTU as u32),
+            local.is_slt * AB::F::from_canonical_u32(Opcode::SLT as u32)
+                + local.is_sltu * AB::F::from_canonical_u32(Opcode::SLTU as u32),
             Word::extend_var::<AB>(local.a),
             local.b,
             local.c,

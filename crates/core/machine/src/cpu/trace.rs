@@ -139,17 +139,17 @@ impl CpuChip {
         *cols.op_b_access.value_mut() = event.b.into();
         *cols.op_c_access.value_mut() = event.c.into();
 
-        cols.shard_to_send = if instruction.is_memory_load_instruction() ||
-            instruction.is_memory_store_instruction() ||
-            instruction.is_ecall_instruction()
+        cols.shard_to_send = if instruction.is_memory_load_instruction()
+            || instruction.is_memory_store_instruction()
+            || instruction.is_ecall_instruction()
         {
             cols.shard
         } else {
             F::zero()
         };
-        cols.clk_to_send = if instruction.is_memory_load_instruction() ||
-            instruction.is_memory_store_instruction() ||
-            instruction.is_ecall_instruction()
+        cols.clk_to_send = if instruction.is_memory_load_instruction()
+            || instruction.is_memory_store_instruction()
+            || instruction.is_ecall_instruction()
         {
             F::from_canonical_u32(event.clk)
         } else {

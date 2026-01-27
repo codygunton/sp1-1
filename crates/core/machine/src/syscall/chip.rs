@@ -177,14 +177,14 @@ impl<F: PrimeField32> MachineAir<F> for SyscallChip {
                         .iter()
                         .filter(|e| e.syscall_code.should_send() == 1)
                         .take(1)
-                        .count() >
-                        0
+                        .count()
+                        > 0
                 }
                 SyscallShardKind::Precompile => {
-                    !shard.precompile_events.is_empty() &&
-                        shard.cpu_events.is_empty() &&
-                        shard.global_memory_initialize_events.is_empty() &&
-                        shard.global_memory_finalize_events.is_empty()
+                    !shard.precompile_events.is_empty()
+                        && shard.cpu_events.is_empty()
+                        && shard.global_memory_initialize_events.is_empty()
+                        && shard.global_memory_finalize_events.is_empty()
                 }
             }
         }

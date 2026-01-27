@@ -152,8 +152,8 @@ impl SyscallInstrsChip {
         let is_enter_unconstrained = {
             IsZeroOperation::<AB::F>::eval(
                 builder,
-                syscall_id -
-                    AB::Expr::from_canonical_u32(SyscallCode::ENTER_UNCONSTRAINED.syscall_id()),
+                syscall_id
+                    - AB::Expr::from_canonical_u32(SyscallCode::ENTER_UNCONSTRAINED.syscall_id()),
                 local.is_enter_unconstrained,
                 local.is_real.into(),
             );
@@ -370,8 +370,8 @@ impl SyscallInstrsChip {
         let is_commit_deferred_proofs = {
             IsZeroOperation::<AB::F>::eval(
                 builder,
-                syscall_id -
-                    AB::Expr::from_canonical_u32(
+                syscall_id
+                    - AB::Expr::from_canonical_u32(
                         SyscallCode::COMMIT_DEFERRED_PROOFS.syscall_id(),
                     ),
                 local.is_commit_deferred_proofs,
