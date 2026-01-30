@@ -30,7 +30,7 @@ jobs:
       release_name: ${{ steps.release_info.outputs.release_name }}
       changelog: ${{ steps.build_changelog.outputs.changelog }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -107,7 +107,7 @@ jobs:
           #   platform: win32
           #   arch: amd64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # Install rust and go
       - name: Install rust
@@ -236,7 +236,7 @@ jobs:
             arch: x86_64
     steps:
       # Note: We need to checkout the repo in order to upload artifacts to the release.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ github.ref }}
 
@@ -312,7 +312,7 @@ jobs:
     needs: [sp1-gpu-server-release, cargo-prove-release, prepare]
     if: ${{ success() && inputs.prerelease != true }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set latest release
         env:
@@ -342,7 +342,7 @@ jobs:
     runs-on: "${{ matrix.runner }}"
     steps:
       - name: "Checkout source code"
-        uses: "actions/checkout@v4"
+        uses: "actions/checkout@v6"
 
       - name: "Install SP1"
         run: |
@@ -395,7 +395,7 @@ jobs:
     needs: [sp1-gpu-server-release, cargo-prove-release, prepare]
     if: failure()
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # todo remove this and use GH cli to create the issue
       - uses: JasonEtco/create-an-issue@v2
@@ -414,7 +414,7 @@ jobs:
     needs: [sp1-gpu-server-release, cargo-prove-release, prepare]
     if: failure()
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Delete failed release
         env:
