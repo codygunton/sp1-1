@@ -7663,6 +7663,7 @@ dependencies = [
  "blake3",
  "cfg-if",
  "dirs",
+ "getrandom 0.2.17",
  "hex",
  "lazy_static",
  "rstest 0.25.0",
