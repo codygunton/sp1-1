@@ -8,14 +8,17 @@ build-circuits:
 	mkdir -p build/groth16 && \
 	mkdir -p build/plonk && \
 	RUST_LOG=debug \
-	cargo run -p sp1-prover --release --bin build_groth16_bn254 --features native-gnark -- \
+	cargo run -p sp1-prover --release --bin build_groth16_bn254 -- \
 	--build-dir=./build/groth16 && \
 	RUST_LOG=debug \
-	cargo run -p sp1-prover --release --bin build_plonk_bn254 --features native-gnark -- \
+	cargo run -p sp1-prover --release --bin build_plonk_bn254 -- \
 	--build-dir=./build/plonk
 
 release-circuits:
 	bash release.sh
+
+release-circuits-with-trusted-setup:
+	bash release.sh --with-trusted-setup
 
 release-shapes:
 	bash shapes.sh
