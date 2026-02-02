@@ -54,6 +54,7 @@ use sp1_recursion_machine::chips::{
     select::SelectChip,
 };
 use sp1_verifier::compressed::RECURSION_MAX_LOG_ROW_COUNT;
+use static_assertions::const_assert;
 use thiserror::Error;
 use tokio::task::JoinSet;
 
@@ -92,8 +93,14 @@ pub enum SP1RecursionProgramShape {
     Shrink,
 }
 
-const PADDED_ELEMENT_THRESHOLD: u64 =
-    sp1_core_executor::ELEMENT_THRESHOLD + (1 << CORE_LOG_STACKING_HEIGHT);
+// The maximum number of elements possible in the proving system.
+const PADDED_ELEMENT_THRESHOLD: u64 = 1 << 29;
+
+// The padding threshold must be at least the element threshold plus the core stacking height.
+const_assert!(
+    PADDED_ELEMENT_THRESHOLD
+        >= sp1_core_executor::ELEMENT_THRESHOLD + (1 << CORE_LOG_STACKING_HEIGHT)
+);
 
 #[derive(Debug, Error)]
 pub enum VkBuildError {
