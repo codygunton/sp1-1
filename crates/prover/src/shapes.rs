@@ -94,7 +94,8 @@ pub enum SP1RecursionProgramShape {
 }
 
 // The maximum number of elements possible in the proving system.
-const PADDED_ELEMENT_THRESHOLD: u64 = (1 << 29) - (1 << 5);
+const PADDED_ELEMENT_THRESHOLD: u64 =
+    sp1_core_executor::ELEMENT_THRESHOLD + (1 << CORE_LOG_STACKING_HEIGHT);
 
 // The padding threshold must be at least the element threshold plus the core stacking height.
 const_assert!(
@@ -807,7 +808,6 @@ mod tests {
         setup_logger();
         let elf = test_artifacts::FIBONACCI_ELF;
         let client = SP1LightNode::new().await;
-        // let prover = SP1ProverBuilder::new().without_recursion_vks().build().await;
         let vk = client.setup(&elf).await?;
 
         let context =
