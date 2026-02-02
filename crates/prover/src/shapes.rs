@@ -94,7 +94,7 @@ pub enum SP1RecursionProgramShape {
 }
 
 // The maximum number of elements possible in the proving system.
-const PADDED_ELEMENT_THRESHOLD: u64 = 1 << 29;
+const PADDED_ELEMENT_THRESHOLD: u64 = (1 << 29) - (1 << 5);
 
 // The padding threshold must be at least the element threshold plus the core stacking height.
 const_assert!(
