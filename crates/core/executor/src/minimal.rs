@@ -1,11 +1,14 @@
 #![allow(clippy::items_after_statements)]
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 
 use crate::{events::MemoryRecord, ExecutionRecord, Program, SupervisorMode, UserMode};
-pub use arch::{MaybeCowPageProt, MinimalExecutor, UnsafeMemory};
+pub use arch::{MinimalExecutor, UnsafeMemory};
 use hashbrown::HashSet;
 pub use postprocess::chunked_memory_init_events;
-use sp1_jit::PageProtValue;
+use sp1_jit::{
+    debug::{self as jit_debug, DebugState},
+    PageProtValue,
+};
 pub use sp1_jit::{MemValue, TraceChunkRaw};
 
 mod arch;
@@ -71,6 +74,15 @@ impl MinimalExecutorEnum {
         }
     }
 
+    /// Calls `exit_code` to respective `MinimalExecutor`.
+    #[must_use]
+    pub fn exit_code(&self) -> u32 {
+        match self {
+            Self::Supervisor(e) => e.exit_code(),
+            Self::User(e) => e.exit_code(),
+        }
+    }
+
     /// Calls `global_clk` to respective `MinimalExecutor`.
     #[must_use]
     pub fn global_clk(&self) -> u64 {
@@ -127,10 +139,28 @@ impl MinimalExecutorEnum {
 
     /// Calls `hints` to respective `MinimalExecutor`.
     #[must_use]
-    pub fn hints(&self) -> &Vec<(u64, Vec<u8>)> {
+    pub fn hints(&self) -> &[(u64, Vec<u8>)] {
         match self {
             Self::Supervisor(e) => e.hints(),
             Self::User(e) => e.hints(),
+        }
+    }
+
+    /// Calls `registers` to respective `MinimalExecutor`.
+    #[must_use]
+    pub fn registers(&self) -> [u64; 32] {
+        match self {
+            Self::Supervisor(e) => e.registers(),
+            Self::User(e) => e.registers(),
+        }
+    }
+
+    /// Calls `pc` to respective `MinimalExecutor`.
+    #[must_use]
+    pub fn pc(&self) -> u64 {
+        match self {
+            Self::Supervisor(e) => e.pc(),
+            Self::User(e) => e.pc(),
         }
     }
 
@@ -145,7 +175,7 @@ impl MinimalExecutorEnum {
 
     /// Calls `get_page_prot` to respective `MinimalExecutor`.
     #[must_use]
-    pub fn get_page_prot_record(&self, page_idx: u64) -> Option<&PageProtValue> {
+    pub fn get_page_prot_record(&self, page_idx: u64) -> Option<PageProtValue> {
         match self {
             Self::Supervisor(e) => e.get_page_prot_record(page_idx),
             Self::User(e) => e.get_page_prot_record(page_idx),
@@ -175,6 +205,22 @@ impl MinimalExecutorEnum {
         match self {
             Self::Supervisor(e) => e.take_invocation_tracker(),
             Self::User(e) => e.take_invocation_tracker(),
+        }
+    }
+}
+
+impl DebugState for MinimalExecutorEnum {
+    fn current_state(&self) -> jit_debug::State {
+        match self {
+            Self::Supervisor(e) => e.current_state(),
+            Self::User(e) => e.current_state(),
+        }
+    }
+
+    fn new_debug_receiver(&mut self) -> Option<mpsc::Receiver<Option<jit_debug::State>>> {
+        match self {
+            Self::Supervisor(e) => e.new_debug_receiver(),
+            Self::User(e) => e.new_debug_receiver(),
         }
     }
 }

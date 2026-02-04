@@ -2,53 +2,31 @@
 
 use super::{TranspilerBackend, CONTEXT};
 use crate::{
-    DebugFn, EcallHandler, ExternFn, JitFunction, RiscOperand, RiscRegister, RiscvTranspiler,
+    DebugFn, EcallHandler, ExternFn, JitRegion, RiscOperand, RiscRegister, RiscvTranspiler,
 };
 use dynasmrt::{
     dynasm,
     x64::{Assembler, Rq},
     DynasmApi,
 };
-use std::io;
 
 impl RiscvTranspiler for TranspilerBackend {
     fn new(
         program_size: usize,
-        memory_size: usize,
+        max_memory_size: usize,
         max_trace_size: u64,
-        pc_start: u64,
         pc_base: u64,
         clk_bump: u64,
+        enable_untrusted_program: bool,
     ) -> Result<Self, std::io::Error> {
-        if pc_start < pc_base {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "pc_start must be greater than pc_base",
-            ));
-        }
-
         let inner = Assembler::new()?;
-
-        // Create a trace buffer with that should only be 90% full before exiting.
-        let capacity_bytes = if max_trace_size == 0 {
-            0
-        } else {
-            let event_bytes = max_trace_size as usize * std::mem::size_of::<crate::MemValue>();
-            let event_bytes = event_bytes * 10 / 9;
-            let header_bytes = std::mem::size_of::<crate::TraceChunkHeader>();
-            event_bytes + header_bytes
-        };
 
         let mut this = Self {
             inner,
             jump_table: Vec::with_capacity(program_size),
-            // Double the size of memory.
-            // We are going to store entries of the form (clk, word).
-            memory_size: memory_size * 2,
-            trace_buf_size: capacity_bytes,
+            max_memory_size,
             has_instructions: false,
             pc_base,
-            pc_start,
             // Register a dummy ecall handler.
             ecall_handler: super::ecallk as _,
             control_flow_instruction_inserted: false,
@@ -56,6 +34,9 @@ impl RiscvTranspiler for TranspilerBackend {
             clk_bump,
             max_trace_size,
             may_early_exit: false,
+            exit_label_offset: 0,
+            long_jump_label_offset: 0,
+            enable_untrusted_program,
         };
 
         // Handle calling conventions and save anything were gonna clobber.
@@ -112,19 +93,25 @@ impl RiscvTranspiler for TranspilerBackend {
         self.instruction_started = false;
     }
 
-    fn finalize(mut self) -> io::Result<JitFunction> {
+    fn finalize(mut self) -> JitRegion {
         self.epilogue();
 
         let code = self.inner.finalize().expect("failed to finalize x86 backend");
 
         debug_assert!(code.size() > 0, "Got empty x86 code buffer");
 
-        JitFunction::new(
+        tracing::info!(
+            "create JIT region from 0x{:x} to 0x{:x}, native code size: {} bytes",
+            self.pc_base,
+            self.pc_base + self.jump_table.len() as u64 * 4,
+            code.size(),
+        );
+        JitRegion::new(
             code,
             self.jump_table,
-            self.memory_size,
-            self.trace_buf_size,
-            self.pc_start,
+            self.exit_label_offset,
+            self.long_jump_label_offset,
+            self.pc_base,
         )
     }
 

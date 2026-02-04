@@ -34,6 +34,14 @@ pub const PROT_WRITE: u8 = PF_W as u8;
 pub const PROT_EXEC: u8 = PF_X as u8;
 pub const DEFAULT_PAGE_PROT: u8 = PROT_READ | PROT_WRITE;
 
+/// SP1 only allows 4 combinations of mprotect flags:
+/// * Inaccessible: not readable, not writable, not executable
+/// * Read-write: readable, writable, not executable
+/// * Read-execute: readable, not writable, executable
+/// * Read: readable, not writable, not executable
+pub const PERMITTED_PROTS: [u8; 4] =
+    [PROT_NONE, PROT_READ | PROT_WRITE, PROT_READ | PROT_EXEC, PROT_READ];
+
 /// The values here are chosen based on RISC-V's specifications.
 pub const PROT_FAILURE_EXEC: u64 = 1;
 pub const PROT_FAILURE_READ: u64 = 5;

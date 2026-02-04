@@ -272,11 +272,7 @@ impl<M: ExecutionMode> SyscallContext for MinimalExecutor<M> {
     }
 
     fn elf_info(&self) -> ElfInfo {
-        ElfInfo {
-            pc_base: self.program.pc_base,
-            instruction_count: self.program.instructions.len(),
-            untrusted_memory: self.program.untrusted_memory,
-        }
+        self.program.elf_info()
     }
 
     fn init_addr_iter(&self) -> impl IntoIterator<Item = u64> {
@@ -501,7 +497,7 @@ impl<M: ExecutionMode> MinimalExecutor<M> {
 
     /// Get the hints of the executor
     #[must_use]
-    pub fn hints(&self) -> &Vec<(u64, Vec<u8>)> {
+    pub fn hints(&self) -> &[(u64, Vec<u8>)] {
         &self.hints
     }
 
@@ -547,8 +543,8 @@ impl<M: ExecutionMode> MinimalExecutor<M> {
 
     /// Get the page protection record for a specific page index.
     #[must_use]
-    pub fn get_page_prot_record(&self, page_idx: u64) -> Option<&PageProtValue> {
-        self.page_prots.get(page_idx)
+    pub fn get_page_prot_record(&self, page_idx: u64) -> Option<PageProtValue> {
+        self.page_prots.get(page_idx).copied()
     }
 
     /// Get an unsafe memory view of the executor.

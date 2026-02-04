@@ -121,6 +121,13 @@ pub struct ElfInfo {
     pub untrusted_memory: Option<(u64, u64)>,
 }
 
+impl ElfInfo {
+    #[inline]
+    pub fn enable_untrusted_program(&self) -> bool {
+        self.untrusted_memory.is_some()
+    }
+}
+
 #[repr(C)]
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MemValue {
@@ -152,6 +159,46 @@ impl From<MemValue> for PageProtValue {
     fn from(v: MemValue) -> PageProtValue {
         assert!(v.value & !0xff == 0, "value = {:x}", v.value);
         PageProtValue { timestamp: v.clk, value: (v.value & 0xff).try_into().unwrap() }
+    }
+}
+
+/// PageProtValue in lazy-initialized anonymous memory
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct LazyPageProtValue {
+    pub timestamp: u64,
+    pub value: u8,
+    pub(crate) inited: u8,
+}
+
+impl LazyPageProtValue {
+    pub fn inited(&self) -> bool {
+        self.inited != 0
+    }
+
+    pub fn set_inited(&mut self) {
+        self.inited = 1;
+    }
+}
+
+impl From<LazyPageProtValue> for Option<PageProtValue> {
+    fn from(v: LazyPageProtValue) -> Option<PageProtValue> {
+        if v.inited() {
+            Some(PageProtValue { timestamp: v.timestamp, value: v.value })
+        } else {
+            None
+        }
+    }
+}
+
+impl From<&PageProtValue> for LazyPageProtValue {
+    fn from(v: &PageProtValue) -> LazyPageProtValue {
+        LazyPageProtValue { timestamp: v.timestamp, value: v.value, inited: 1 }
+    }
+}
+
+impl Default for LazyPageProtValue {
+    fn default() -> Self {
+        (&PageProtValue::default()).into()
     }
 }
 

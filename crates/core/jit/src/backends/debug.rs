@@ -1,9 +1,8 @@
 use crate::{
     debug, ComputeInstructions, ControlFlowInstructions, DebugFn, Debuggable, EcallHandler,
-    ExternFn, JitContext, JitFunction, MemoryInstructions, RiscOperand, RiscRegister,
+    ExternFn, JitContext, JitRegion, MemoryInstructions, RiscOperand, RiscRegister,
     RiscvTranspiler, SystemInstructions, TraceCollector,
 };
-use std::io;
 
 pub struct DebugBackend<B: RiscvTranspiler> {
     backend: B,
@@ -20,12 +19,18 @@ impl<B: RiscvTranspiler + Debuggable> RiscvTranspiler for DebugBackend<B> {
         program_size: usize,
         memory_size: usize,
         max_trace_size: u64,
-        pc_start: u64,
         pc_base: u64,
         clk_bump: u64,
+        enable_untrusted_program: bool,
     ) -> Result<Self, std::io::Error> {
-        let backend =
-            B::new(program_size, memory_size, max_trace_size, pc_start, pc_base, clk_bump)?;
+        let backend = B::new(
+            program_size,
+            memory_size,
+            max_trace_size,
+            pc_base,
+            clk_bump,
+            enable_untrusted_program,
+        )?;
 
         Ok(Self::new(backend))
     }
@@ -41,7 +46,7 @@ impl<B: RiscvTranspiler + Debuggable> RiscvTranspiler for DebugBackend<B> {
 
         extern "C" fn collect_registers(ctx: *mut JitContext) {
             let ctx = unsafe { &mut *ctx };
-            if let Some(sender) = &ctx.debug_sender {
+            if let Some(sender) = ctx.debug_sender() {
                 sender
                     .send(Some(debug::State {
                         pc: ctx.pc,
@@ -75,7 +80,7 @@ impl<B: RiscvTranspiler + Debuggable> RiscvTranspiler for DebugBackend<B> {
         self.backend.call_extern_fn(handler);
     }
 
-    fn finalize(self) -> io::Result<JitFunction> {
+    fn finalize(self) -> JitRegion {
         self.backend.finalize()
     }
 }
@@ -723,8 +728,8 @@ impl<B: RiscvTranspiler> TraceCollector for DebugBackend<B> {
         self.backend.trace_clk_start();
     }
 
-    fn trace_mem_value(&mut self, rs1: RiscRegister, imm: u64) {
-        self.backend.trace_mem_value(rs1, imm);
+    fn trace_mem_value(&mut self, rs1: RiscRegister, imm: u64, is_write: bool, clk_bump: i32) {
+        self.backend.trace_mem_value(rs1, imm, is_write, clk_bump);
     }
 
     fn trace_pc_start(&mut self) {

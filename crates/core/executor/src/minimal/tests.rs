@@ -11,7 +11,7 @@ fn test_chunk_stops_correctly() {
     let program = Program::from(&KECCAK256_ELF).unwrap();
     let program = Arc::new(program);
 
-    let mut executor = MinimalExecutor::<SupervisorMode>::new(program.clone(), true, Some(10));
+    let mut executor = MinimalExecutorEnum::new(program.clone(), true, Some(10));
     // executor.debug();
     executor.with_input(&serialize(&5_usize).unwrap());
     for i in 0..5 {
@@ -61,7 +61,7 @@ mod differential_tests {
         let program = Arc::new(program);
 
         // Run the native x86_64 executor
-        let mut native_executor = NativeExecutor::new(program.clone(), false, None);
+        let mut native_executor = NativeExecutor::<UserMode>::new(program.clone(), false, None);
         let native_time = {
             let start = std::time::Instant::now();
             while native_executor.execute_chunk().is_some() {}
@@ -112,7 +112,7 @@ mod differential_tests {
         while portable_executor.execute_chunk().is_some() {}
 
         // Run the native x86_64 executor
-        let mut native_executor = NativeExecutor::new(program.clone(), false, None);
+        let mut native_executor = NativeExecutor::<UserMode>::new(program.clone(), false, None);
         native_executor.with_input(&serialize(&5_usize).unwrap());
         for i in 0..5 {
             native_executor.with_input(&serialize(&vec![i; i]).unwrap());
@@ -266,7 +266,7 @@ mod differential_tests {
                 portable.new_debug_receiver().expect("Failed to create debug receiver");
 
             // Native x86_64 executor
-            let mut native = NativeExecutor::new(program.clone(), true, None);
+            let mut native = NativeExecutor::<UserMode>::new(program.clone(), true, None);
             let native_rx = native.new_debug_receiver().expect("Failed to create debug receiver");
 
             s.spawn(move || while portable.execute_chunk().is_some() {});
@@ -314,5 +314,180 @@ mod differential_tests {
                 }
             });
         });
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_endian = "little", feature = "profiling",))]
+mod trace_tests {
+    use std::sync::Arc;
+
+    use crate::{minimal::arch::x86_64::MinimalExecutor as NativeExecutor, Program, UserMode};
+    use sp1_jit::MinimalTrace;
+    use sp1_primitives::Elf;
+
+    use super::MinimalExecutor;
+
+    // Tests that portable executor and native executor generate the same traces.
+    #[allow(clippy::cast_precision_loss)]
+    fn run_program_and_compare_trace(program: &Elf) {
+        const DEBUG: bool = false;
+        const TRACE_SIZE: u64 = 100_0000;
+
+        let program = Program::from(program).unwrap();
+        let program = Arc::new(program);
+
+        let mut native = NativeExecutor::<UserMode>::new(program.clone(), DEBUG, Some(TRACE_SIZE));
+        let mut portable =
+            MinimalExecutor::<UserMode>::new(program.clone(), DEBUG, Some(TRACE_SIZE));
+
+        loop {
+            assert_eq!(native.global_clk(), portable.global_clk());
+
+            let chunk1 = native.execute_chunk();
+            let chunk2 = portable.execute_chunk();
+            assert_eq!(chunk1.is_some(), chunk2.is_some());
+
+            if chunk1.is_none() {
+                break;
+            }
+
+            let chunk1 = chunk1.unwrap();
+            let chunk2 = chunk2.unwrap();
+
+            assert_eq!(chunk1.start_registers(), chunk2.start_registers());
+            assert_eq!(chunk1.pc_start(), chunk2.pc_start());
+            assert_eq!(chunk1.clk_start(), chunk2.clk_start());
+            assert_eq!(chunk1.clk_end(), chunk2.clk_end());
+            if chunk1.num_mem_reads() != chunk2.num_mem_reads() {
+                panic!(
+                    "Native executor generates {} values, while portable executor generates {} values",
+                    chunk1.num_mem_reads(),
+                    chunk2.num_mem_reads()
+                );
+            }
+            for (i, (a, b)) in chunk1.mem_reads().zip(chunk2.mem_reads()).enumerate() {
+                if a != b {
+                    eprintln!("Trace item #{i} does not match!");
+                    eprintln!("Trace item from native: {a:?}");
+                    eprintln!("Trace item from portable: {b:?}");
+                    panic!("Trigger error!");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_run_fibonacci() {
+        run_program_and_compare_trace(&test_artifacts::FIBONACCI_ELF);
+    }
+
+    #[test]
+    fn test_run_sha256() {
+        run_program_and_compare_trace(&test_artifacts::SHA2_ELF);
+    }
+
+    #[test]
+    fn test_run_sha_compress() {
+        run_program_and_compare_trace(&test_artifacts::SHA_COMPRESS_ELF);
+    }
+
+    #[test]
+    fn test_run_keccak_permute() {
+        run_program_and_compare_trace(&test_artifacts::KECCAK_PERMUTE_ELF);
+    }
+
+    #[test]
+    fn test_run_secp256k1_add() {
+        run_program_and_compare_trace(&test_artifacts::SECP256K1_ADD_ELF);
+    }
+
+    #[test]
+    fn test_run_secp256k1_double() {
+        run_program_and_compare_trace(&test_artifacts::SECP256K1_DOUBLE_ELF);
+    }
+
+    #[test]
+    fn test_run_secp256r1_add() {
+        run_program_and_compare_trace(&test_artifacts::SECP256R1_ADD_ELF);
+    }
+
+    #[test]
+    fn test_run_secp256r1_double() {
+        run_program_and_compare_trace(&test_artifacts::SECP256R1_DOUBLE_ELF);
+    }
+
+    #[test]
+    fn test_run_bls12_381_add() {
+        run_program_and_compare_trace(&test_artifacts::BLS12381_ADD_ELF);
+    }
+
+    #[test]
+    fn test_ed_add() {
+        run_program_and_compare_trace(&test_artifacts::ED_ADD_ELF);
+    }
+
+    #[test]
+    fn test_bn254_add() {
+        run_program_and_compare_trace(&test_artifacts::BN254_ADD_ELF);
+    }
+
+    #[test]
+    fn test_bn254_double() {
+        run_program_and_compare_trace(&test_artifacts::BN254_DOUBLE_ELF);
+    }
+
+    #[test]
+    fn test_bn254_mul() {
+        run_program_and_compare_trace(&test_artifacts::BN254_MUL_ELF);
+    }
+
+    #[test]
+    fn test_uint256_mul() {
+        run_program_and_compare_trace(&test_artifacts::UINT256_MUL_ELF);
+    }
+
+    #[test]
+    fn test_bls12_381_fp() {
+        run_program_and_compare_trace(&test_artifacts::BLS12381_FP_ELF);
+    }
+
+    #[test]
+    fn test_bls12_381_fp2_mul() {
+        run_program_and_compare_trace(&test_artifacts::BLS12381_FP2_MUL_ELF);
+    }
+
+    #[test]
+    fn test_bls12_381_fp2_addsub() {
+        run_program_and_compare_trace(&test_artifacts::BLS12381_FP2_ADDSUB_ELF);
+    }
+
+    #[test]
+    fn test_bn254_fp() {
+        run_program_and_compare_trace(&test_artifacts::BN254_FP_ELF);
+    }
+
+    #[test]
+    fn test_bn254_fp2_addsub() {
+        run_program_and_compare_trace(&test_artifacts::BN254_FP2_ADDSUB_ELF);
+    }
+
+    #[test]
+    fn test_bn254_fp2_mul() {
+        run_program_and_compare_trace(&test_artifacts::BN254_FP2_MUL_ELF);
+    }
+
+    #[test]
+    fn test_ed_decompress() {
+        run_program_and_compare_trace(&test_artifacts::ED_DECOMPRESS_ELF);
+    }
+
+    #[test]
+    fn test_ed25519_verify() {
+        run_program_and_compare_trace(&test_artifacts::ED25519_ELF);
+    }
+
+    #[test]
+    fn test_ssz_withdrawls() {
+        run_program_and_compare_trace(&test_artifacts::SSZ_WITHDRAWALS_ELF);
     }
 }

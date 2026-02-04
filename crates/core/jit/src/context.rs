@@ -1,7 +1,13 @@
-use crate::{debug, ElfInfo, Interrupt, MemValue, PageProtValue, RiscRegister, TraceChunkHeader};
+use crate::{
+    debug, ElfInfo, Interrupt, JitFunction, LazyPageProtValue, MemValue, PageProtValue,
+    RiscRegister, TraceChunkHeader, UnsafeMemory,
+};
 use memmap2::{MmapMut, MmapOptions};
-use sp1_primitives::consts::{PROT_READ, PROT_WRITE};
-use std::{collections::VecDeque, io, os::fd::RawFd, ptr::NonNull, sync::mpsc};
+use sp1_primitives::consts::{
+    LOG_PAGE_SIZE, PAGE_SIZE, PROT_EXEC, PROT_FAILURE_EXEC, PROT_FAILURE_READ, PROT_FAILURE_WRITE,
+    PROT_READ, PROT_WRITE,
+};
+use std::{collections::VecDeque, io, ptr::NonNull, sync::mpsc};
 
 pub trait SyscallContext {
     /// Read a value from a register.
@@ -146,94 +152,184 @@ impl SyscallContext for JitContext {
     }
 
     fn mr_without_prot(&mut self, addr: u64) -> u64 {
-        unsafe { ContextMemory::new(self).mr(addr) }
+        debug_assert!(addr.is_multiple_of(8), "Address {addr} is not aligned to 8");
+
+        let memory = self.unsafe_memory();
+        let entry = unsafe { memory.get(addr) };
+
+        if self.tracing() {
+            unsafe {
+                self.trace_mem_access(&[entry]);
+
+                // Bump the clk
+                let new_entry = MemValue { value: entry.value, clk: self.clk };
+                memory.set(addr, &new_entry);
+            }
+        }
+
+        entry.value
     }
 
     fn mw_without_prot(&mut self, addr: u64, val: u64) {
-        unsafe { ContextMemory::new(self).mw(addr, val) };
+        debug_assert!(addr.is_multiple_of(8), "Address {addr} is not aligned to 8");
+
+        let memory = self.unsafe_memory();
+
+        // Bump the clk and insert the new value.
+        let value = MemValue { value: val, clk: self.clk };
+
+        // Trace the current entry.
+        if self.tracing() {
+            unsafe {
+                // Trace the current entry, the clock is bumped in the subsequent write.
+                let current_entry = memory.get(addr);
+                self.trace_mem_access(&[current_entry, value]);
+            }
+        }
+
+        // SAFETY: The pointer is valid to write to, as it was aligned by us during allocation.
+        // See [JitFunction::new] for more details.
+        unsafe { memory.set(addr, &value) };
     }
 
     fn mr_slice_without_prot(&mut self, addr: u64, len: usize) -> impl IntoIterator<Item = &u64> {
         debug_assert!(addr.is_multiple_of(8), "Address {addr} is not aligned to 8");
 
-        // Convert the byte address to the word address.
-        let word_address = addr / 8;
-
-        let ptr = self.memory.as_ptr() as *mut MemValue;
-        let ptr = unsafe { ptr.add(word_address as usize) };
-
-        // SAFETY: The pointer is valid to write to, as it was aligned by us during allocation.
-        // See [JitFunction::new] for more details.
-        let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+        let memory = self.unsafe_memory();
 
         if self.tracing() {
             unsafe {
-                self.trace_mem_access(slice);
+                self.trace_mem_access(&memory.mem_values(addr, len));
 
                 // Bump the clk on the all current entries.
-                for (i, entry) in slice.iter().enumerate() {
-                    let new_entry = MemValue { value: entry.value, clk: self.clk };
-                    std::ptr::write(ptr.add(i), new_entry)
-                }
+                memory.set_slice_clks(addr, len, self.clk);
             }
         }
 
-        slice.iter().map(|val| &val.value)
+        unsafe { memory.value_slice(addr, len) }
     }
 
     fn mr_slice_no_trace(&mut self, addr: u64, len: usize) -> impl IntoIterator<Item = &u64> {
         debug_assert!(addr.is_multiple_of(8), "Address {addr} is not aligned to 8");
 
-        // Convert the byte address to the word address.
-        let word_address = addr / 8;
-
-        let ptr = self.memory.as_ptr() as *mut MemValue;
-        let ptr = unsafe { ptr.add(word_address as usize) };
-
-        // SAFETY: The pointer is valid to write to, as it was aligned by us during allocation.
-        // See [JitFunction::new] for more details.
-        let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
-
-        slice.iter().map(|val| &val.value)
+        let memory = self.unsafe_memory();
+        unsafe { memory.value_slice(addr, len) }
     }
 
     fn mr_slice_unsafe(&mut self, addr: u64, len: usize) -> impl IntoIterator<Item = &u64> {
         debug_assert!(addr.is_multiple_of(8), "Address {addr} is not aligned to 8");
 
-        // Convert the byte address to the word address.
-        let word_address = addr / 8;
-
-        let ptr = self.memory.as_ptr() as *mut MemValue;
-        let ptr = unsafe { ptr.add(word_address as usize) };
-
-        // SAFETY: The pointer is valid to write to, as it was aligned by us during allocation.
-        // See [JitFunction::new] for more details.
-        let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+        let memory = self.unsafe_memory();
 
         if self.tracing() {
             unsafe {
-                self.trace_mem_access(slice);
+                self.trace_mem_access(&memory.mem_values(addr, len));
             }
         }
 
-        slice.iter().map(|val| &val.value)
+        unsafe { memory.value_slice(addr, len) }
     }
 
     fn mw_slice_without_prot(&mut self, addr: u64, vals: &[u64]) {
-        unsafe { ContextMemory::new(self).mw_slice(addr, vals) };
+        // unsafe { ContextMemory::new(self).mw_slice(addr, vals) };
+        debug_assert!(addr.is_multiple_of(8), "Address {addr} is not aligned to 8");
+
+        let memory = self.unsafe_memory();
+
+        // Trace the current entries.
+        if self.tracing() {
+            unsafe {
+                let current_entries = memory.mem_values(addr, vals.len());
+                for (curr, new_value) in current_entries.iter().zip(vals.iter()) {
+                    self.trace_mem_access(&[*curr, MemValue { value: *new_value, clk: self.clk }]);
+                }
+            }
+        }
+
+        // Bump the clk and insert the new values.
+        unsafe {
+            memory.set_slice_clks(addr, vals.len(), self.clk);
+            memory.set_slice_values(addr, vals);
+        }
     }
 
-    fn page_prot_write(&mut self, _addr: u64, _val: u8) {
-        unimplemented!()
+    fn page_prot_write(&mut self, addr: u64, val: u8) {
+        assert!(addr.is_multiple_of(PAGE_SIZE as u64), "addr must be page aligned");
+        assert!(
+            addr < self.function().max_memory_size as u64,
+            "addr must be less than maximum possible value"
+        );
+        assert!(
+            self.function().elf_info.untrusted_memory.is_some_and(|(s, e)| addr >= s && addr < e),
+            "untrusted mode must be turned on, the requested page must be in untrusted memory region",
+        );
+
+        let page_idx = addr >> LOG_PAGE_SIZE;
+
+        if self.tracing() && (!self.is_unconstrained()) {
+            // Buffered page prot value takes precedence
+            let page_prot_value = self
+                .function()
+                .buffered_mprotect_calls
+                .get(&page_idx)
+                .cloned()
+                .or_else(|| self.function_mut().get_page_prot_record(page_idx))
+                .unwrap_or_default();
+            unsafe {
+                self.trace_mem_access(&[page_prot_value.into()]);
+            }
+        }
+
+        let value = PageProtValue { timestamp: self.clk, value: val };
+        self.function_mut().buffered_mprotect_calls.insert(page_idx, value);
+    }
+
+    #[inline]
+    fn page_prot_flush(&mut self) {
+        self.function_mut().commit_buffered_prots()
     }
 
     fn prot_slice_check(
         &mut self,
-        _addr: u64,
-        _len: usize,
-        _prot_bitmap: u8,
+        addr: u64,
+        len: usize,
+        prot_bitmap: u8,
     ) -> Result<(), Interrupt> {
-        unimplemented!()
+        // While instruction level load / store relies on CPU's MMU & OS for
+        // permission checking, this still needs implementation for precompiles.
+        if !self.function().elf_info.enable_untrusted_program() {
+            return Ok(());
+        }
+
+        let first_page_idx = addr >> LOG_PAGE_SIZE;
+        let last_page_idx = (addr + (len - 1) as u64 * 8) >> LOG_PAGE_SIZE;
+
+        for page_idx in first_page_idx..=last_page_idx {
+            let mut page_prot_value =
+                self.function_mut().get_page_prot_record(page_idx).unwrap_or_default();
+            if self.tracing() && (!self.is_unconstrained()) {
+                unsafe {
+                    self.trace_mem_access(&[page_prot_value.into()]);
+                }
+            }
+
+            // This is only fired from precompiles, there is no need to adjust
+            // MemoryAccessPosition.
+            page_prot_value.timestamp = self.clk;
+            self.function_mut().set_page_prot_record(page_idx, &page_prot_value);
+
+            // Check permissions
+            if (prot_bitmap & PROT_EXEC) != 0 && (page_prot_value.value & PROT_EXEC) == 0 {
+                return Err(Interrupt { code: PROT_FAILURE_EXEC });
+            }
+            if (prot_bitmap & PROT_READ) != 0 && (page_prot_value.value & PROT_READ) == 0 {
+                return Err(Interrupt { code: PROT_FAILURE_READ });
+            }
+            if (prot_bitmap & PROT_WRITE) != 0 && (page_prot_value.value & PROT_WRITE) == 0 {
+                return Err(Interrupt { code: PROT_FAILURE_WRITE });
+            }
+        }
+        Ok(())
     }
 
     fn input_buffer(&mut self) -> &mut VecDeque<Vec<u8>> {
@@ -253,17 +349,18 @@ impl SyscallContext for JitContext {
     }
 
     fn trace_hint(&mut self, addr: u64, value: Vec<u8>) {
-        if self.tracing {
+        if self.tracing() {
             unsafe { self.trace_hint(addr, value) };
         }
     }
 
     fn mw_hint(&mut self, addr: u64, val: u64) {
-        unsafe { ContextMemory::new(self).mw_hint(addr, val) };
+        let new_entry = MemValue { value: val, clk: 0 };
+        unsafe { self.unsafe_memory().set(addr, &new_entry) };
     }
 
     fn set_exit_code(&mut self, exit_code: u32) {
-        self.exit_code = exit_code;
+        unsafe { self.function.as_mut() }.exit_code = exit_code;
     }
 
     fn is_unconstrained(&self) -> bool {
@@ -332,8 +429,6 @@ pub struct JitContext {
     /// This context is in unconstrainted mode.
     /// 1 if unconstrained, 0 otherwise.
     pub is_unconstrained: u64,
-    /// Mapping from (pc - pc_base) / 4 => absolute address of the instruction.
-    pub(crate) jump_table: NonNull<*const u8>,
     /// The pointer to the program memory.
     pub(crate) memory: NonNull<u8>,
     /// The pointer to the trace buffer.
@@ -341,22 +436,33 @@ pub struct JitContext {
     /// The registers to start the execution with,
     /// these are loaded into real native registers at the start of execution.
     pub(crate) registers: [u64; 32],
-    /// The input buffer to the program.
-    pub(crate) input_buffer: NonNull<VecDeque<Vec<u8>>>,
-    /// A stream of public values from the program (global to entire program).
-    pub(crate) public_values_stream: NonNull<Vec<u8>>,
-    /// The hints read by the program, with thier corresponding start address.
-    pub(crate) hints: NonNull<Vec<(u64, Vec<u8>)>>,
-    /// The memory file descriptor, this is used to create the COW memory at runtime.
-    pub(crate) memory_fd: RawFd,
     /// The unconstrained context, this is used to create the COW memory at runtime.
     pub(crate) maybe_unconstrained: Option<UnconstrainedCtx>,
-    /// Whether the JIT is tracing.
-    pub(crate) tracing: bool,
-    /// Whether the JIT is sending debug state every instruction.
-    pub(crate) debug_sender: Option<mpsc::SyncSender<Option<debug::State>>>,
-    /// The exit code of the program.
-    pub(crate) exit_code: u32,
+    /// A reference to the JIT function being executed, so we can retrieve
+    /// necessary data.
+    pub(crate) function: NonNull<JitFunction>,
+    /// Cached permission table, this is used by tracing & precompiles. Instruction-level
+    /// permission checking is enforced by CPU's MMU w/ OS.
+    pub(crate) permission: *mut LazyPageProtValue,
+    /// Count of permission entries
+    pub(crate) permission_count: u64,
+    /// Memory start offset in the mmap
+    pub(crate) memory_offset: u64,
+    /// Maximum memory size, can be used to calculate clock address from memory address
+    pub(crate) max_memory_size: u64,
+
+    // The following data are tied to a specific JitRegion, when JitRegion is
+    // swapped, they should be changed.
+    /// Mapping from (pc - pc_base) / 4 => absolute address of the instruction.
+    pub(crate) jump_table: NonNull<*const u8>,
+    /// Exit label address
+    pub(crate) exit_label: *const u8,
+    /// Long jump label address
+    pub(crate) long_jump_label: *const u8,
+    /// PC base
+    pub(crate) pc_base: u64,
+    /// PC end
+    pub(crate) pc_end: u64,
 }
 
 impl JitContext {
@@ -391,14 +497,13 @@ impl JitContext {
     pub fn enter_unconstrained(&mut self) -> io::Result<()> {
         // SAFETY: The memory is allocated by the [JitFunction] and is valid, not aliased, and has
         // enough space for the alignment.
-        let mut cow_memory =
-            unsafe { MmapOptions::new().no_reserve_swap().map_copy(self.memory_fd)? };
+        let mut cow_memory = unsafe {
+            MmapOptions::new().no_reserve_swap().map_copy(&self.function.as_ref().mem_fd)?
+        };
         let cow_memory_ptr = cow_memory.as_mut_ptr();
 
-        // Align the ptr to u32.
-        // SAFETY: u8 has the minimum alignment, so any larger alignment will be a multiple of this.
-        let align_offset = cow_memory_ptr.align_offset(std::mem::align_of::<u64>());
-        let cow_memory_ptr = unsafe { cow_memory_ptr.add(align_offset) };
+        // Mmap memory will be aligned to pages, so there is no need to adjust for alignment.
+        let cow_memory_ptr = unsafe { cow_memory_ptr.add(self.memory_offset as usize) };
 
         // Preserve the current state of the JIT context.
         self.maybe_unconstrained = Some(UnconstrainedCtx {
@@ -445,24 +550,19 @@ impl JitContext {
     /// - The hints pointer must not be mutably aliased.
     pub unsafe fn trace_hint(&mut self, addr: u64, value: Vec<u8>) {
         debug_assert!(addr.is_multiple_of(8), "Address {addr} is not aligned to 8");
-        self.hints.as_mut().push((addr, value));
-    }
-
-    /// Obtain a mutable view of the emulated memory.
-    pub const fn memory(&mut self) -> ContextMemory<'_> {
-        unsafe { ContextMemory::new(self) }
+        self.function_mut().hints.push((addr, value));
     }
 
     /// # Safety
     /// - The input buffer must be non null and valid to read from.
     pub const unsafe fn input_buffer(&mut self) -> &mut VecDeque<Vec<u8>> {
-        self.input_buffer.as_mut()
+        &mut self.function_mut().input_buffer
     }
 
     /// # Safety
     /// - The public values stream must be non null and valid to read from.
     pub const unsafe fn public_values_stream(&mut self) -> &mut Vec<u8> {
-        self.public_values_stream.as_mut()
+        &mut self.function_mut().public_values_stream
     }
 
     /// Obtain a view of the registers.
@@ -479,8 +579,28 @@ impl JitContext {
     }
 
     #[inline]
+    pub const fn function(&self) -> &JitFunction {
+        unsafe { self.function.as_ref() }
+    }
+
+    #[inline]
+    pub const fn function_mut(&mut self) -> &mut JitFunction {
+        unsafe { self.function.as_mut() }
+    }
+
+    #[inline]
     pub const fn tracing(&self) -> bool {
-        self.tracing
+        self.function().tracing()
+    }
+
+    #[inline]
+    pub fn debug_sender(&self) -> Option<&mpsc::SyncSender<Option<debug::State>>> {
+        self.function().debug_sender.as_ref()
+    }
+
+    #[inline]
+    pub fn unsafe_memory(&self) -> UnsafeMemory {
+        UnsafeMemory { ptr: self.memory, max_memory_size: self.max_memory_size as usize }
     }
 }
 
@@ -499,199 +619,4 @@ pub struct UnconstrainedCtx {
     pub global_clk: u64,
     // The registers.
     pub registers: [u64; 32],
-}
-
-/// A type representing the memory of the emulated program.
-///
-/// This is used to read and write to the memory in precompile impls.
-pub struct ContextMemory<'a> {
-    ctx: &'a mut JitContext,
-}
-
-impl<'a> ContextMemory<'a> {
-    /// Create a new memory view.
-    ///
-    /// This type takes in a mutable refrence with a lifetime to avoid aliasing the underlying
-    /// memory region.
-    ///
-    /// # Safety
-    /// - The memory is valid for the lifetime of this type.
-    /// - The memory should be aligned to 8 bytes.
-    /// - The memory should be valid to read from and write to.
-    /// - The memory should be the expected size.
-    const unsafe fn new(ctx: &'a mut JitContext) -> Self {
-        Self { ctx }
-    }
-
-    #[inline]
-    pub const fn tracing(&self) -> bool {
-        self.ctx.tracing()
-    }
-
-    /// Read a u64 from the memory.
-    pub fn mr(&self, addr: u64) -> u64 {
-        debug_assert!(addr.is_multiple_of(8), "Address {addr} is not aligned to 8");
-        // Convert the byte address to the word address.
-        let word_address = addr / 8;
-
-        let ptr = self.ctx.memory.as_ptr() as *mut MemValue;
-        let ptr = unsafe { ptr.add(word_address as usize) };
-
-        // SAFETY: The pointer is valid to read from, as it was aligned by us during allocation.
-        // See [JitFunction::new] for more details.
-        let entry = unsafe { std::ptr::read(ptr) };
-
-        if self.tracing() {
-            unsafe {
-                self.ctx.trace_mem_access(&[entry]);
-
-                // Bump the clk
-                let new_entry = MemValue { value: entry.value, clk: self.ctx.clk };
-                std::ptr::write(ptr, new_entry);
-            }
-        }
-
-        entry.value
-    }
-
-    /// Write a u64 to the memory.
-    pub fn mw(&mut self, addr: u64, val: u64) {
-        debug_assert!(addr.is_multiple_of(8), "Address {addr} is not aligned to 8");
-
-        // Convert the byte address to the word address.
-        let word_address = addr / 8;
-
-        let ptr = self.ctx.memory.as_ptr() as *mut MemValue;
-        let ptr = unsafe { ptr.add(word_address as usize) };
-
-        // Bump the clk and insert the new value.
-        let value = MemValue { value: val, clk: self.ctx.clk };
-
-        // Trace the current entry.
-        if self.tracing() {
-            unsafe {
-                // Trace the current entry, the clock is bumped in the subsequent write.
-                let current_entry = std::ptr::read(ptr);
-                self.ctx.trace_mem_access(&[current_entry, value]);
-            }
-        }
-
-        // SAFETY: The pointer is valid to write to, as it was aligned by us during allocation.
-        // See [JitFunction::new] for more details.
-        unsafe { std::ptr::write(ptr, value) };
-    }
-
-    /// Read a slice of u64 from the memory.
-    pub fn mr_slice(&self, addr: u64, len: usize) -> impl IntoIterator<Item = &u64> + Clone {
-        debug_assert!(addr.is_multiple_of(8), "Address {addr} is not aligned to 8");
-
-        // Convert the byte address to the word address.
-        let word_address = addr / 8;
-
-        let ptr = self.ctx.memory.as_ptr() as *mut MemValue;
-        let ptr = unsafe { ptr.add(word_address as usize) };
-
-        // SAFETY: The pointer is valid to write to, as it was aligned by us during allocation.
-        // See [JitFunction::new] for more details.
-        let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
-
-        if self.tracing() {
-            unsafe {
-                self.ctx.trace_mem_access(slice);
-
-                // Bump the clk on the all current entries.
-                for (i, entry) in slice.iter().enumerate() {
-                    let new_entry = MemValue { value: entry.value, clk: self.ctx.clk };
-                    std::ptr::write(ptr.add(i), new_entry)
-                }
-            }
-        }
-
-        slice.iter().map(|val| &val.value)
-    }
-
-    // Read a slice from memory, without bumping the clk.
-    pub fn mr_slice_unsafe(&self, addr: u64, len: usize) -> impl IntoIterator<Item = &u64> + Clone {
-        debug_assert!(addr.is_multiple_of(8), "Address {addr} is not aligned to 8");
-
-        // Convert the byte address to the word address.
-        let word_address = addr / 8;
-
-        let ptr = self.ctx.memory.as_ptr() as *mut MemValue;
-        let ptr = unsafe { ptr.add(word_address as usize) };
-
-        // SAFETY: The pointer is valid to write to, as it was aligned by us during allocation.
-        // See [JitFunction::new] for more details.
-        let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
-
-        if self.tracing() {
-            unsafe {
-                self.ctx.trace_mem_access(slice);
-            }
-        }
-
-        slice.iter().map(|val| &val.value)
-    }
-
-    /// Write a slice of u64 to the memory.
-    pub fn mw_slice(&mut self, addr: u64, vals: &[u64]) {
-        debug_assert!(addr.is_multiple_of(8), "Address {addr} is not aligned to 8");
-
-        // Convert the byte address to the word address.
-        let word_address = addr / 8;
-
-        let ptr = self.ctx.memory.as_ptr() as *mut MemValue;
-        let ptr = unsafe { ptr.add(word_address as usize) };
-
-        // Bump the clk and insert the new values.
-        let values = vals.iter().map(|val| MemValue { value: *val, clk: self.ctx.clk });
-
-        // Trace the current entries.
-
-        if self.tracing() {
-            unsafe {
-                let current_entries = std::slice::from_raw_parts(ptr, vals.len());
-
-                for (curr, new) in current_entries.iter().zip(values.clone()) {
-                    self.ctx.trace_mem_access(&[*curr, new]);
-                }
-            }
-        }
-
-        for (i, val) in values.enumerate() {
-            unsafe { std::ptr::write(ptr.add(i), val) };
-        }
-    }
-
-    // Read a slice from memory, without bumping the clk.
-    pub fn mr_slice_no_trace(
-        &self,
-        addr: u64,
-        len: usize,
-    ) -> impl IntoIterator<Item = &u64> + Clone {
-        debug_assert!(addr.is_multiple_of(8), "Address {addr} is not aligned to 8");
-
-        // Convert the byte address to the word address.
-        let word_address = addr / 8;
-
-        let ptr = self.ctx.memory.as_ptr() as *mut MemValue;
-        let ptr = unsafe { ptr.add(word_address as usize) };
-
-        // SAFETY: The pointer is valid to write to, as it was aligned by us during allocation.
-        // See [JitFunction::new] for more details.
-        let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
-
-        slice.iter().map(|val| &val.value)
-    }
-
-    /// Write a u64 to memory, without tracing and sets the clk in the entry to 0.
-    pub fn mw_hint(&mut self, addr: u64, val: u64) {
-        let words = addr / 8;
-
-        let ptr = self.ctx.memory.as_ptr() as *mut MemValue;
-        let ptr = unsafe { ptr.add(words as usize) };
-
-        let new_entry = MemValue { value: val, clk: 0 };
-        unsafe { std::ptr::write(ptr, new_entry) };
-    }
 }

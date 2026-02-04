@@ -1,19 +1,40 @@
+use hashbrown::HashMap;
 use sp1_jit::{
-    ComputeInstructions, JitContext, MemoryInstructions, RiscOperand, RiscRegister,
-    RiscvTranspiler, SystemInstructions,
+    ComputeInstructions, ElfInfo, JitContext, JitFunction, JitRegion, MemoryInstructions,
+    RiscOperand, RiscRegister, RiscvTranspiler, SystemInstructions, TranspilerRunner,
 };
+use std::{collections::BTreeMap, sync::Arc};
 
 // Import the actual sp1_ecall_handler from the minimal executor
 use crate::minimal::ecall::sp1_ecall_handler;
 
 // Helper function to create a new backend for testing
 fn new_backend() -> sp1_jit::backends::x86::TranspilerBackend {
-    sp1_jit::backends::x86::TranspilerBackend::new(0, 1024 * 2, 1000, 100, 100, 8).unwrap()
+    sp1_jit::backends::x86::TranspilerBackend::new(0, 1024 * 4, 1000, 100, 8, false).unwrap()
+}
+
+struct DummyRunner {}
+
+impl TranspilerRunner for DummyRunner {
+    fn transpile(&self, _programs: &[u32], _pc_base: u64) -> Result<JitRegion, std::io::Error> {
+        unimplemented!()
+    }
 }
 
 // Finalize the function and call it.
 fn run_test(assembler: sp1_jit::backends::x86::TranspilerBackend) {
-    let mut func = assembler.finalize().expect("Failed to finalize function");
+    let region = assembler.finalize();
+    let mut func = JitFunction::new(
+        region,
+        1024 * 4,
+        1000,
+        100,
+        ElfInfo { pc_base: 100, instruction_count: 200, untrusted_memory: None },
+        Box::new(DummyRunner {}),
+        Arc::new(HashMap::new()),
+        BTreeMap::new(),
+    )
+    .expect("Failed to finalize function");
 
     unsafe {
         func.call();
