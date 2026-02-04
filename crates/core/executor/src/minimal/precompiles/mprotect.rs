@@ -1,5 +1,5 @@
 use sp1_jit::{Interrupt, SyscallContext};
-use sp1_primitives::consts::PAGE_SIZE;
+use sp1_primitives::consts::{PAGE_SIZE, PERMITTED_PROTS};
 
 use crate::memory::MAX_LOG_ADDR;
 
@@ -13,6 +13,8 @@ pub fn mprotect_syscall(
 
     assert!(addr.is_multiple_of(PAGE_SIZE as u64), "addr must be page aligned");
     assert!(addr < 1 << MAX_LOG_ADDR, "addr must be less than 2^48");
+    assert!(PERMITTED_PROTS.contains(&prot), "prot must be a permitted combination");
+    assert!(!ctx.is_unconstrained(), "mprotect is disabled in unconstrained mode");
 
     ctx.page_prot_write(addr, prot);
 

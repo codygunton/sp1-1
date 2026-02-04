@@ -1,8 +1,11 @@
 use super::TranspilerBackend;
 use crate::{
-    ComputeInstructions, ControlFlowInstructions, Debuggable, JitContext, MemoryInstructions,
-    MinimalTrace, RiscOperand, RiscRegister, RiscvTranspiler,
+    ComputeInstructions, ControlFlowInstructions, Debuggable, ElfInfo, JitContext, JitFunction,
+    JitRegion, LazyPageProtValue, MemValue, MemoryInstructions, MemoryView, MinimalTrace,
+    PageProtValue, RiscOperand, RiscRegister, RiscvTranspiler, TranspilerRunner,
 };
+use hashbrown::HashMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 macro_rules! assert_register_is {
     ($expected:expr) => {{
@@ -14,13 +17,36 @@ macro_rules! assert_register_is {
     }};
 }
 
+struct DummyRunner {}
+
+impl TranspilerRunner for DummyRunner {
+    fn transpile(&self, _programs: &[u32], _pc_base: u64) -> Result<JitRegion, std::io::Error> {
+        unimplemented!()
+    }
+}
+
 fn new_backend() -> TranspilerBackend {
-    TranspilerBackend::new(0, 1024 * 2, 1000, 100, 100, 8).unwrap()
+    TranspilerBackend::new(0, 1024 * 4, 1000, 100, 8, false).unwrap()
+}
+
+fn finalize_backend(assembler: TranspilerBackend) -> JitFunction {
+    let region = assembler.finalize();
+    JitFunction::new(
+        region,
+        1024 * 4,
+        1000,
+        100,
+        ElfInfo { pc_base: 100, instruction_count: 200, untrusted_memory: None },
+        Box::new(DummyRunner {}),
+        Arc::new(HashMap::new()),
+        BTreeMap::new(),
+    )
+    .expect("Failed to finalize function")
 }
 
 /// Finalize the function and call it.
 fn run_test(assembler: TranspilerBackend) {
-    let mut func = assembler.finalize().expect("Failed to finalize function");
+    let mut func = finalize_backend(assembler);
 
     unsafe {
         func.call();
@@ -949,14 +975,14 @@ mod control_flow {
     //     // Do memory operations up to just below the 90% threshold
     //     for i in 0..8 {
     //         backend.lw(RiscRegister::X1, RiscRegister::X0, i * 4);
-    //         backend.trace_mem_value(RiscRegister::X0, i * 4);
+    //         backend.trace_mem_value(RiscRegister::X0, i * 4, false);
     //         backend.exit_if_trace_exceeds(trace_size);
     //         // Should continue since we're still below 90% threshold (9 reads)
     //     }
 
     //     // Now add the 9th memory read - this should trigger the exit at 90% threshold
     //     backend.lw(RiscRegister::X3, RiscRegister::X0, 32);
-    //     backend.trace_mem_value(RiscRegister::X0, 32); // num_mem_reads = 9
+    //     backend.trace_mem_value(RiscRegister::X0, 32, false); // num_mem_reads = 9
     //     backend.exit_if_trace_exceeds(trace_size);
     //     // Should exit here since 9 >= 9 (90% of 10)
 
@@ -1054,23 +1080,23 @@ mod control_flow {
 }
 
 mod memory {
-    use crate::MemValue;
-
     use super::*;
 
-    fn run_test_with_memory(assembler: TranspilerBackend, memory: &[(u32, u32)]) {
-        let mut func = assembler.finalize().expect("Failed to finalize function");
+    fn run_test_with_memory(assembler: TranspilerBackend, memory: &[(u64, u32)]) {
+        let mut func = finalize_backend(assembler);
+        let unsafe_memory = func.memory_view().unsafe_memory();
 
         for (addr, val) in memory {
-            assert!(*addr < func.memory.len() as u32, "Addr out of bounds");
+            assert!(*addr < func.max_memory_size as u64, "Addr out of bounds");
             assert!(*addr % 4 == 0, "Addr must be 4 byte aligned");
 
-            let addr = 2 * *addr as usize + 8;
             let bytes = val.to_le_bytes();
-            func.memory[addr] = bytes[0];
-            func.memory[addr + 1] = bytes[1];
-            func.memory[addr + 2] = bytes[2];
-            func.memory[addr + 3] = bytes[3];
+            unsafe {
+                unsafe_memory.set_byte(*addr, bytes[0]);
+                unsafe_memory.set_byte(addr + 1, bytes[1]);
+                unsafe_memory.set_byte(addr + 2, bytes[2]);
+                unsafe_memory.set_byte(addr + 3, bytes[3]);
+            }
         }
 
         unsafe {
@@ -1078,18 +1104,14 @@ mod memory {
         }
     }
 
-    fn run_test_and_check_memory(assembler: TranspilerBackend, check: impl Fn(&[MemValue])) {
-        let mut func = assembler.finalize().expect("Failed to finalize function");
+    fn run_test_and_check_memory(assembler: TranspilerBackend, check: impl Fn(MemoryView<'_>)) {
+        let mut func = finalize_backend(assembler);
 
         unsafe {
             func.call();
         }
 
-        unsafe fn caster(input: &[u8]) -> &[MemValue] {
-            std::mem::transmute(input)
-        }
-
-        check(unsafe { caster(&func.memory) });
+        check(func.memory_view());
     }
 
     #[test]
@@ -1162,7 +1184,7 @@ mod memory {
         backend.sw(RiscRegister::X0, RiscRegister::X1, 0); // SW: m(rs1 + imm) = rs2
 
         run_test_and_check_memory(backend, |memory| {
-            assert_eq!(memory[0].value, 5);
+            assert_eq!(memory.get(0).value, 5);
         });
     }
 
@@ -1180,7 +1202,7 @@ mod memory {
         backend.sh(RiscRegister::X0, RiscRegister::X1, 0);
 
         run_test_and_check_memory(backend, |memory| {
-            assert_eq!(memory[0].value, 0x01F2); // low byte
+            assert_eq!(memory.get(0).value, 0x01F2); // low byte
         });
     }
 
@@ -1198,10 +1220,10 @@ mod memory {
         backend.sb(RiscRegister::X0, RiscRegister::X1, 0);
 
         run_test_and_check_memory(backend, |memory| {
-            assert_eq!(memory[0].value, 0xAB);
+            assert_eq!(memory.get(0).value, 0xAB);
 
             // confirm surrounding bytes remain zero
-            assert_eq!(memory[1].value, 0x00);
+            assert_eq!(memory.get(8).value, 0x00);
         });
     }
 
@@ -1267,17 +1289,19 @@ mod memory {
     }
 
     // Helper function for 64-bit memory operations
-    fn run_test_with_memory_64(assembler: TranspilerBackend, memory: &[(u32, u64)]) {
-        let mut func = assembler.finalize().expect("Failed to finalize function");
+    fn run_test_with_memory_64(assembler: TranspilerBackend, memory: &[(u64, u64)]) {
+        let mut func = finalize_backend(assembler);
+        let unsafe_memory = func.memory_view().unsafe_memory();
 
         for (addr, val) in memory {
-            assert!(*addr < func.memory.len() as u32, "Addr out of bounds");
+            assert!(*addr < func.max_memory_size as u64, "Addr out of bounds");
             assert!(*addr % 8 == 0, "Addr must be 8 byte aligned");
 
             let bytes = val.to_le_bytes();
-            let actual_addr = 2 * *addr as usize + 8;
             for (i, byte) in bytes.iter().enumerate() {
-                func.memory[actual_addr + i] = *byte;
+                unsafe {
+                    unsafe_memory.set_byte(addr + i as u64, *byte);
+                }
             }
         }
 
@@ -1337,7 +1361,7 @@ mod memory {
         backend.sd(RiscRegister::X0, RiscRegister::X1, 0);
 
         run_test_and_check_memory(backend, |memory| {
-            let val = memory[0].value;
+            let val = memory.get(0).value;
             assert_eq!(val, 0xFEDCBA9876543210);
         });
     }
@@ -1358,7 +1382,7 @@ mod memory {
         backend.sd(RiscRegister::X2, RiscRegister::X1, 16);
 
         run_test_and_check_memory(backend, |memory| {
-            let val = memory[3].value;
+            let val = memory.get(24).value;
             assert_eq!(val, 0x12345678 + 0x12345678);
         });
     }
@@ -1416,7 +1440,7 @@ mod infra {
         backend.start_instr();
         backend.inspect_register(RiscRegister::X5, assert_register_is!(5));
 
-        let mut func = backend.finalize().expect("Failed to finalize function");
+        let mut func = finalize_backend(backend);
         func.registers[5] = 5;
 
         unsafe {
@@ -1431,7 +1455,7 @@ mod infra {
         backend.start_instr();
         backend.add(RiscRegister::X1, RiscOperand::Immediate(5), RiscOperand::Immediate(0));
 
-        let mut func = backend.finalize().expect("Failed to finalize function");
+        let mut func = finalize_backend(backend);
         unsafe {
             func.call();
         }
@@ -1464,7 +1488,7 @@ mod trace {
         // Do a store into addr = 0, and trace it.
         backend.add(RiscRegister::X1, RiscOperand::Immediate(5), RiscOperand::Immediate(0));
         backend.sw(RiscRegister::X0, RiscRegister::X1, 0);
-        backend.trace_mem_value(RiscRegister::X0, 0);
+        backend.trace_mem_value(RiscRegister::X0, 0, true, 1);
 
         // Do a store into addr = 8, and trace it.
         backend.add(RiscRegister::X2, RiscOperand::Immediate(10), RiscOperand::Immediate(0));
@@ -1472,9 +1496,9 @@ mod trace {
 
         // Bump the clk by 8.
         backend.bump_clk();
-        backend.trace_mem_value(RiscRegister::X0, 8);
+        backend.trace_mem_value(RiscRegister::X0, 8, false, 1);
         // The last trace call should have bumped the clk by 8.
-        backend.trace_mem_value(RiscRegister::X0, 8);
+        backend.trace_mem_value(RiscRegister::X0, 8, false, 1);
 
         backend.call_extern_fn(some_precompile);
 
@@ -1482,7 +1506,7 @@ mod trace {
         backend.trace_registers();
         backend.trace_pc_start();
 
-        let mut func = backend.finalize().expect("Failed to finalize function");
+        let mut func = finalize_backend(backend);
         let trace = unsafe { func.call() }.expect("No trace returned");
 
         let registers = trace.start_registers();
@@ -1511,4 +1535,39 @@ mod trace {
         assert_eq!(mem_reads[3].clk, 5);
         assert_eq!(mem_reads[4].clk, 10);
     }
+}
+
+// This test asserts the sizes and offsets of fields for the following structures:
+// * LazyPageProtValue
+// * PageProtValue
+// * MemValue
+// If you need to change this test, you might also want to change JIT logic in
+// `TranspilerBackend::trace_mem_value`.
+#[test]
+fn test_jit_memory_structue_layouts() {
+    assert_eq!(std::mem::size_of::<LazyPageProtValue>(), 16);
+    assert_eq!(std::mem::offset_of!(LazyPageProtValue, timestamp), 0);
+    assert_eq!(std::mem::offset_of!(LazyPageProtValue, value), 8);
+    assert_eq!(std::mem::offset_of!(LazyPageProtValue, inited), 9);
+
+    let array = [LazyPageProtValue::default(); 5];
+    let slice_offset_of = |slice: &[LazyPageProtValue], idx: usize| {
+        let base_ptr = slice.as_ptr();
+        let element_ptr = unsafe { base_ptr.add(idx) };
+        (element_ptr as usize) - (base_ptr as usize)
+    };
+
+    assert_eq!(slice_offset_of(&array[..], 0), 0);
+    assert_eq!(slice_offset_of(&array[..], 1), 16);
+    assert_eq!(slice_offset_of(&array[..], 2), 32);
+    assert_eq!(slice_offset_of(&array[..], 3), 48);
+    assert_eq!(slice_offset_of(&array[..], 4), 64);
+
+    assert_eq!(std::mem::size_of::<MemValue>(), 16);
+    assert_eq!(std::mem::offset_of!(MemValue, clk), 0);
+    assert_eq!(std::mem::offset_of!(MemValue, value), 8);
+
+    assert_eq!(std::mem::size_of::<PageProtValue>(), 16);
+    assert_eq!(std::mem::offset_of!(PageProtValue, timestamp), 0);
+    assert_eq!(std::mem::offset_of!(PageProtValue, value), 8);
 }

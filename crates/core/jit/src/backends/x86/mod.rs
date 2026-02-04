@@ -1,22 +1,27 @@
 #![allow(clippy::fn_to_numeric_cast)]
 
 use crate::{
-    EcallHandler, JitContext, RiscOperand, RiscRegister, TraceChunkHeader, TraceCollector,
+    EcallHandler, JitContext, RiscOperand, RiscRegister, RiscvTranspiler, TraceChunkHeader,
+    TraceCollector,
 };
 use dynasmrt::{
     dynasm,
     x64::{Assembler, Rq},
     DynasmApi, DynasmLabelApi,
 };
+use sp1_primitives::consts::{DEFAULT_PAGE_PROT, LOG_PAGE_SIZE};
 use std::{
     mem::offset_of,
     ops::{Deref, DerefMut},
+    ptr::NonNull,
 };
 
 mod instruction_impl;
 #[cfg(test)]
 mod tests;
 mod transpiler;
+
+// In addition to TEMP_A and TEMP_A, rax is also a free scratch register.
 
 /// The first scratch register.
 ///
@@ -66,18 +71,14 @@ pub struct TranspilerBackend {
     inner: Assembler,
     /// A mapping of pc - pc_base => offset in the code buffer.
     jump_table: Vec<usize>,
-    /// The size of the memory buffer to allocate.
-    memory_size: usize,
-    /// The size of the trace buffer to allocate.
-    trace_buf_size: usize,
+    /// The size of the max memory for SP1 program.
+    max_memory_size: usize,
     /// The maximum trace size.
     max_trace_size: u64,
     /// Has at least one instruction been inserted.
     has_instructions: bool,
     /// The pc base.
     pc_base: u64,
-    /// The pc start.
-    pc_start: u64,
     /// The ecall handler.
     ecall_handler: EcallHandler,
     /// If a control flow instruction has been inserted.
@@ -88,6 +89,12 @@ pub struct TranspilerBackend {
     may_early_exit: bool,
     /// The amount to bump the clk by each cycle.
     clk_bump: u64,
+    /// Exit label offset
+    exit_label_offset: usize,
+    /// Long jump label offset, long jump means jumping to another JIT region.
+    long_jump_label_offset: usize,
+    /// Indicate if untrusted program is enabled
+    enable_untrusted_program: bool,
 }
 
 impl TraceCollector for TranspilerBackend {
@@ -106,14 +113,11 @@ impl TraceCollector for TranspilerBackend {
     }
 
     /// Write the value at [rs1 + imm] into the trace buffer.
-    fn trace_mem_value(&mut self, rs1: RiscRegister, imm: u64) {
+    fn trace_mem_value(&mut self, rs1: RiscRegister, imm: u64, is_write: bool, clk_bump: i32) {
         const TAIL_START_OFFSET: i32 = std::mem::size_of::<TraceChunkHeader>() as i32;
         const NUM_MEM_READS_OFFSET: i32 = offset_of!(TraceChunkHeader, num_mem_reads) as i32;
         const IS_UNCONSTRAINED_OFFSET: i32 = offset_of!(JitContext, is_unconstrained) as i32;
-
-        // Load the value, assumed to be of a memory read, into TEMP_A.
-        self.emit_risc_operand_load(rs1.into(), TEMP_A);
-        self.load_memory_ptr(TEMP_B);
+        let max_memory_size = self.max_memory_size as i64;
 
         dynasm! {
             self;
@@ -121,7 +125,14 @@ impl TraceCollector for TranspilerBackend {
 
             // Check if were in unconstrained mode.
             cmp QWORD [Rq(CONTEXT) + IS_UNCONSTRAINED_OFFSET], 1;
-            je >done;
+            je >done
+        }
+
+        // Load the value, assumed to be of a memory read, into TEMP_A.
+        self.emit_risc_operand_load(rs1.into(), TEMP_A);
+        dynasm! {
+            self;
+            .arch x64;
 
             // ------------------------------------
             // Compute the address to load from.
@@ -134,44 +145,145 @@ impl TraceCollector for TranspilerBackend {
             and Rq(TEMP_A), -8;
 
             // ------------------------------------
-            // Scale by the entry size.
+            // Compute the pointer to the tail
+            // and store into `TEMP_B`.
             // ------------------------------------
-            shl Rq(TEMP_A), 1;
+            mov Rq(TEMP_B), QWORD [Rq(TRACE_BUF) + NUM_MEM_READS_OFFSET];
+            shl Rq(TEMP_B), 4; // scale by the size of a `MemValue`.
+            add Rq(TEMP_B), TAIL_START_OFFSET;
+            add Rq(TEMP_B), Rq(TRACE_BUF)
+        }
 
+        if self.enable_untrusted_program {
+            // TODO: for untrusted programs, trace page prot value
+            let permission_offset = offset_of!(JitContext, permission) as i32;
+            let value_n_inited: i16 = ((1u16 << 8) | (DEFAULT_PAGE_PROT as u16)) as i16;
+
+            dynasm! {
+                self;
+                .arch x64;
+
+                // ------------------------------------
+                // Save TEMP_A as it will be used later.
+                // ------------------------------------
+                push Rq(TEMP_A);
+
+                // ------------------------------------
+                // Calculate page index, then permission offset.
+                // ------------------------------------
+                shr Rq(TEMP_A), LOG_PAGE_SIZE as _;
+                shl Rq(TEMP_A), 4;
+
+                // ------------------------------------
+                // Locate the permission field to access.
+                // ------------------------------------
+                add Rq(TEMP_A), QWORD [Rq(CONTEXT) + permission_offset];
+
+                // ------------------------------------
+                // Load half-word first.
+                // High byte is inited,
+                // Low byte is value.
+                // ------------------------------------
+                mov ax, WORD [Rq(TEMP_A) + 8];
+
+                // ------------------------------------
+                // Test ah to see if prot is inited.
+                // ------------------------------------
+                cmp ah, 0;
+                jne >prot_inited;
+
+                // ------------------------------------
+                // Initialize page prot;
+                // ------------------------------------
+                mov QWORD [Rq(TEMP_A)], 0;
+                mov ax, value_n_inited;
+                mov WORD [Rq(TEMP_A) + 8], ax;
+
+                prot_inited:;
+                // ------------------------------------
+                // Copy page prot to trace tail.
+                // ------------------------------------
+                mov BYTE [Rq(TEMP_B) + 8], al;
+                mov rax, QWORD [Rq(TEMP_A)];
+                mov QWORD [Rq(TEMP_B)], rax;
+
+                // ------------------------------------
+                // Bump current clk in prot entry.
+                // ------------------------------------
+                mov rax, QWORD [Rq(CONTEXT) + CLK_OFFSET];
+                add rax, clk_bump;
+                mov [Rq(TEMP_A)], rax;
+
+                // ------------------------------------
+                // Increment the num mem reads, since weve pushed into it.
+                // Increment TEMP_B for tracing mem value.
+                // ------------------------------------
+                add QWORD [Rq(TRACE_BUF) + NUM_MEM_READS_OFFSET], 1;
+                add Rq(TEMP_B), 16;
+
+                // ------------------------------------
+                // Restore TEMP_A.
+                // ------------------------------------
+                pop Rq(TEMP_A)
+            }
+        }
+
+        self.load_memory_ptr(Rq::RAX.into());
+        dynasm! {
+            self;
+            .arch x64;
             // ------------------------------------
             // Add the physical memory pointer.
             // ------------------------------------
-            add Rq(TEMP_A), Rq(TEMP_B);
+            add Rq(TEMP_A), rax;
 
             // ------------------------------------
-            // Compute the pointer to the tail
-            // and store into `rax`.
+            // Load the word into TEMP_B
+            // and store it into the tail.
+            //
+            // UNTRUSTED: when tracing is enabled, memory READ
+            // permission failure will be triggered here.
             // ------------------------------------
-            mov rax, QWORD [Rq(TRACE_BUF) + NUM_MEM_READS_OFFSET];
-            shl rax, 4; // scale by the size of a `MemValue`.
-            add rax, TAIL_START_OFFSET;
-            add rax, Rq(TRACE_BUF);
+            mov rax, QWORD [Rq(TEMP_A)];
+            mov [Rq(TEMP_B) + 8], rax
+        }
+
+        if is_write {
+            dynasm! {
+                self;
+                .arch x64;
+                // ------------------------------------
+                // Dummy ops to test memory write permission
+                //
+                // UNTRUSTED: when tracing is enabled, memory WRITE
+                // permission failure will be triggered here.
+                // ------------------------------------
+                mov QWORD [Rq(TEMP_A)], rax
+            }
+        }
+
+        dynasm! {
+            self;
+            .arch x64;
+            // ------------------------------------
+            // Calculate clock address from memory address in TEMP_A
+            // ------------------------------------
+            mov rax, QWORD max_memory_size;
+            sub Rq(TEMP_A), rax;
 
             // ------------------------------------
             // Load the clk from the memory entry into TEMP_B
             // and store it into the tail.
             // ------------------------------------
-            mov Rq(TEMP_B), QWORD [Rq(TEMP_A)];
-            mov [rax], Rq(TEMP_B);
+            mov rax, QWORD [Rq(TEMP_A)];
+            mov [Rq(TEMP_B)], rax;
 
             // ------------------------------------
             // Bump the current clk in the memory entry.
             // ------------------------------------
-            mov Rq(TEMP_B), QWORD [Rq(CONTEXT) + CLK_OFFSET];
-            add Rq(TEMP_B), 1;
-            mov [Rq(TEMP_A)], Rq(TEMP_B);
-
-            // ------------------------------------
-            // Load the word into TEMP_B
-            // and store it into the tail.
-            // ------------------------------------
-            mov Rq(TEMP_B), QWORD [Rq(TEMP_A) + 8];
-            mov [rax + 8], Rq(TEMP_B);
+            mov rax, QWORD [Rq(CONTEXT) + CLK_OFFSET];
+            add rax, clk_bump;
+            mov [Rq(TEMP_A)], rax;
 
             // ------------------------------------
             // Increment the num mem reads, since weve pushed into it.
@@ -225,12 +337,13 @@ impl TraceCollector for TranspilerBackend {
 
 impl TranspilerBackend {
     fn tracing(&self) -> bool {
-        self.trace_buf_size > 0
+        self.max_trace_size > 0
     }
 
     fn exit_if_trace_exceeds(&mut self, max_trace_size: u64) {
         let num_mem_reads_offset = offset_of!(TraceChunkHeader, num_mem_reads) as i32;
         let threshold_mem_reads = max_trace_size;
+        let exit_label_offset = offset_of!(JitContext, exit_label) as i32;
 
         dynasm! {
             self;
@@ -256,7 +369,8 @@ impl TranspilerBackend {
             // ------------------------------------
             // 4. If num_mem_reads >= threshold, return
             // ------------------------------------
-            jae ->exit;  // Jump if above or equal (unsigned comparison)
+            jb >skip_exit;  // Jump if below (unsigned comparison)
+            jmp QWORD [Rq(CONTEXT) + exit_label_offset];
             skip_exit:
         }
     }
@@ -318,6 +432,29 @@ impl TranspilerBackend {
             );
         }
 
+        if self.enable_untrusted_program {
+            dynasm! {
+                self;
+                .arch x64;
+
+                ->long_jump:
+            }
+            // Save long jump label offset, so we can do far jumps later
+            self.long_jump_label_offset = self.inner.offset().0;
+
+            self.call_extern_fn(sp1_jit_long_jump);
+            // After long jump handler, we need to update JUMP_TABLE register
+            let jump_table_offset = offset_of!(JitContext, jump_table) as i32;
+            dynasm! {
+                self;
+                .arch x64;
+
+                mov Rq(JUMP_TABLE), [Rq(CONTEXT) + jump_table_offset]
+            }
+            // Now jump_to_pc should work
+            self.jump_to_pc();
+        }
+
         // Start the global exit label.
         // Its possible that we need to hit this label due to reaching cycle limt.
         dynasm! {
@@ -327,6 +464,8 @@ impl TranspilerBackend {
             // Define the exit global label.
             ->exit:
         }
+        // Save exit label offset, so we can do far jumps later
+        self.exit_label_offset = self.inner.offset().0;
 
         if self.tracing() {
             self.trace_clk_end();
@@ -557,23 +696,78 @@ impl TranspilerBackend {
     fn jump_to_pc(&mut self) {
         self.load_pc_into_register(TEMP_A);
 
-        let pc_base = self.pc_base as i32;
         dynasm! {
             self;
             .arch x64;
 
             // If the PC we want to jump to is 1, jump to the exit label.
             cmp Rq(TEMP_A), 1;
-            je ->exit;
+            je >near_exit
+        }
 
-            // Subtract the pc base to get the offset from the start of the program.
-            sub Rq(TEMP_A), pc_base;
+        if self.enable_untrusted_program {
+            let pc_base_offset = offset_of!(JitContext, pc_base) as i32;
+            let pc_end_offset = offset_of!(JitContext, pc_end) as i32;
+
+            dynasm! {
+                self;
+                .arch x64;
+
+                // Load pc_end to TEMP_B for comparison
+                mov Rq(TEMP_B), QWORD [Rq(CONTEXT) + pc_end_offset];
+                // // If the PC we want to jump is equal or greater than PC end, jump to long jump label
+                cmp Rq(TEMP_A), Rq(TEMP_B);
+                jae >near_long_jump;
+                // Load pc_base to TEMP_B for comparison
+                mov Rq(TEMP_B), QWORD [Rq(CONTEXT) + pc_base_offset];
+                // Subtract the pc base to get the offset from the start of the program.
+                sub Rq(TEMP_A), Rq(TEMP_B);
+                // If the PC we want to jump to is lower than PC base, jump to long jump label
+                jb >near_long_jump
+            }
+        } else {
+            // In 64-bit RISC-V, some pc_base might not fit in 32-bit immediate value.
+            if let Ok(pc_base) = TryInto::<i32>::try_into(self.pc_base) {
+                dynasm! {
+                    self;
+                    .arch x64;
+                    // Subtract the pc base to get the offset from the start of the program.
+                    sub Rq(TEMP_A), pc_base
+                }
+            } else {
+                let pc_base = self.pc_base as i64;
+                dynasm! {
+                    self;
+                    .arch x64;
+                    // Subtract the pc base to get the offset from the start of the program.
+                    mov Rq(TEMP_B), QWORD pc_base;
+                    sub Rq(TEMP_A), Rq(TEMP_B)
+                }
+            }
+        }
+
+        let exit_label_offset = offset_of!(JitContext, exit_label) as i32;
+        dynasm! {
+            self;
+            .arch x64;
             // Divide by 4 to get the index (each instruction is 4 bytes).
             shr Rq(TEMP_A), 2;
-            // Lookup into the jump table, scaling by 8 since the pointers are 8 bytes.
-            mov Rq(TEMP_B), QWORD [Rq(JUMP_TABLE) + Rq(TEMP_A) * 8];
-            // Jump to the target.
-            jmp Rq(TEMP_B)
+            // Jump via the jump table, scaling by 8 since the pointers are 8 bytes.
+            jmp QWORD [Rq(JUMP_TABLE) + Rq(TEMP_A) * 8];
+
+            near_exit:;
+            jmp QWORD [Rq(CONTEXT) + exit_label_offset]
+        }
+
+        if self.enable_untrusted_program {
+            let long_jump_label_offset = offset_of!(JitContext, long_jump_label) as i32;
+            dynasm! {
+                self;
+                .arch x64;
+
+                near_long_jump:;
+                jmp QWORD [Rq(CONTEXT) + long_jump_label_offset]
+            }
         }
     }
 
@@ -645,4 +839,37 @@ extern "C" fn ecallk(ctx: *mut JitContext) -> u64 {
     ctx.clk += 256;
 
     0
+}
+
+/// Long jump handler. Long jump refers to jumps from one JIT region to
+/// another. In this case, we will need to find the target JitRegion, and
+/// use jump tables, labels from the target JitRegion to replace current
+/// JitRegion.
+extern "C" fn sp1_jit_long_jump(ctx: *mut JitContext) {
+    // SAFETY: ctx will be dereferencable when calling long jump.
+    let ctx = unsafe { &mut *ctx };
+
+    let pc = ctx.pc;
+    let (jump_table, exit_label, long_jump_label, pc_base, pc_end) = if let Some(region) = ctx
+        .function_mut()
+        .regions
+        .iter_mut()
+        .find(|region| pc >= region.pc_base && pc < region.pc_end())
+    {
+        (
+            unsafe { NonNull::new_unchecked(region.jump_table.as_mut_ptr()) },
+            region.exit_label,
+            region.long_jump_label,
+            region.pc_base,
+            region.pc_end(),
+        )
+    } else {
+        panic!("Long jump failed to find JitRegion for pc=0x{pc:x}!");
+    };
+
+    ctx.jump_table = jump_table;
+    ctx.exit_label = exit_label;
+    ctx.long_jump_label = long_jump_label;
+    ctx.pc_base = pc_base;
+    ctx.pc_end = pc_end;
 }

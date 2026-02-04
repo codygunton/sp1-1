@@ -5,7 +5,7 @@ use crate::{
     ExecutionMode, SyscallCode,
 };
 
-use sp1_primitives::consts::PAGE_SIZE;
+use sp1_primitives::consts::{PAGE_SIZE, PERMITTED_PROTS};
 
 #[allow(clippy::unnecessary_wraps)]
 pub(crate) fn mprotect<'a, M: ExecutionMode, RT: SyscallRuntime<'a, M>>(
@@ -18,6 +18,7 @@ pub(crate) fn mprotect<'a, M: ExecutionMode, RT: SyscallRuntime<'a, M>>(
 
     assert!(addr.is_multiple_of(PAGE_SIZE as u64), "addr must be page aligned");
     assert!(addr < 1 << MAX_LOG_ADDR, "addr must be less than 2^48");
+    assert!(PERMITTED_PROTS.contains(&prot), "prot must be a permitted combination");
 
     let page_idx = addr / PAGE_SIZE as u64;
 

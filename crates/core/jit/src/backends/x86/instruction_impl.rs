@@ -1080,20 +1080,6 @@ impl MemoryInstructions for TranspilerBackend {
             add Rq(TEMP_A), imm as i32;
 
             // ------------------------------------
-            // Store the intra-word offset.
-            // ------------------------------------
-            mov rax, Rq(TEMP_A);
-            and rax, 7;
-
-            // ------------------------------------
-            // Align to the start of the word.
-            //
-            // Scale to account for the entry size.
-            // ------------------------------------
-            and Rq(TEMP_A), -8;
-            shl Rq(TEMP_A), 1;
-
-            // ------------------------------------
             // Add the risc32 byte offset to the physical memory pointer
             //
             // TEMP_A = addr + physical_memory_pointer
@@ -1103,12 +1089,12 @@ impl MemoryInstructions for TranspilerBackend {
             // ------------------------------------
             // 4. Load byte → sign-extend to 32 bits
             //
-            // TEMP_B = clk
-            // TEMP_A = addr + physical_memory_pointer
-            // [addr + physical_memory_pointer] = clk
-            // TEMP_A = [addr + physical_memory_pointer + 8]
+            // TEMP_A = [addr + physical_memory_pointer]
+            //
+            // UNTRUSTED: when tracing is disabled, memory READ
+            // permission failure will be triggered here.
             // ------------------------------------
-            movsx Rq(TEMP_A), BYTE [Rq(TEMP_A) + 8 + rax]
+            movsx Rq(TEMP_A), BYTE [Rq(TEMP_A)]
         }
 
         // 4. Write back to destination register
@@ -1137,20 +1123,6 @@ impl MemoryInstructions for TranspilerBackend {
             add Rq(TEMP_A), imm as i32;
 
             // ------------------------------------
-            // Store the intra-word offset.
-            // ------------------------------------
-            mov rax, Rq(TEMP_A);
-            and rax, 7;
-
-            // ------------------------------------
-            // Align to the start of the word.
-            //
-            // Scale to account for the entry size.
-            // ------------------------------------
-            and Rq(TEMP_A), -8;
-            shl Rq(TEMP_A), 1;
-
-            // ------------------------------------
             // Add the risc32 byte offset to the physical memory pointer
             //
             // TEMP_A = addr + physical_memory_pointer
@@ -1159,8 +1131,11 @@ impl MemoryInstructions for TranspilerBackend {
 
             // ------------------------------------
             // Load byte → zero-extend to 32 bits
+            //
+            // UNTRUSTED: when tracing is disabled, memory READ
+            // permission failure will be triggered here.
             // ------------------------------------
-            movzx Rq(TEMP_A), BYTE [Rq(TEMP_A) + 8 + rax]
+            movzx Rq(TEMP_A), BYTE [Rq(TEMP_A)]
         }
 
         self.emit_risc_register_store(TEMP_A, rd);
@@ -1187,20 +1162,6 @@ impl MemoryInstructions for TranspilerBackend {
             // ------------------------------------
             add Rq(TEMP_A), imm as i32;
 
-             // ------------------------------------
-            // Store the intra-word offset.
-            // ------------------------------------
-            mov rax, Rq(TEMP_A);
-            and rax, 7;
-
-            // ------------------------------------
-            // Align to the start of the word.
-            //
-            // Scale to account for the entry size.
-            // ------------------------------------
-            and Rq(TEMP_A), -8;
-            shl Rq(TEMP_A), 1;
-
             // ------------------------------------
             // Add the risc32 byte offset to the physical memory pointer
             //
@@ -1210,8 +1171,11 @@ impl MemoryInstructions for TranspilerBackend {
 
             // ------------------------------------
             // Load half-word → sign-extend to 32 bits
+            //
+            // UNTRUSTED: when tracing is disabled, memory READ
+            // permission failure will be triggered here.
             // ------------------------------------
-            movsx Rq(TEMP_A), WORD [Rq(TEMP_A) + 8 + rax]
+            movsx Rq(TEMP_A), WORD [Rq(TEMP_A)]
         }
 
         self.emit_risc_register_store(TEMP_A, rd);
@@ -1239,20 +1203,6 @@ impl MemoryInstructions for TranspilerBackend {
             add Rq(TEMP_A), imm as i32;
 
             // ------------------------------------
-            // Store the intra-word offset.
-            // ------------------------------------
-            mov rax, Rq(TEMP_A);
-            and rax, 7;
-
-            // ------------------------------------
-            // Align to the start of the word.
-            //
-            // Scale to account for the entry size.
-            // ------------------------------------
-            and Rq(TEMP_A), -8;
-            shl Rq(TEMP_A), 1;
-
-            // ------------------------------------
             // Add the risc32 byte offset to the physical memory pointer
             //
             // TEMP_A = addr + physical_memory_pointer
@@ -1261,8 +1211,11 @@ impl MemoryInstructions for TranspilerBackend {
 
             // ------------------------------------
             // Load 16 bits, zero-extend to 32 bits
+            //
+            // UNTRUSTED: when tracing is disabled, memory READ
+            // permission failure will be triggered here.
             // ------------------------------------
-            movzx Rq(TEMP_A), WORD [Rq(TEMP_A) + 8 + rax]
+            movzx Rq(TEMP_A), WORD [Rq(TEMP_A)]
         }
 
         self.emit_risc_register_store(TEMP_A, rd);
@@ -1290,20 +1243,6 @@ impl MemoryInstructions for TranspilerBackend {
             add Rq(TEMP_A), imm as i32;
 
             // ------------------------------------
-            // Store the intra-word offset.
-            // ------------------------------------
-            mov rax, Rq(TEMP_A);
-            and rax, 7;
-
-            // ------------------------------------
-            // Align to the start of the word.
-            //
-            // Scale to account for the entry size.
-            // ------------------------------------
-            and Rq(TEMP_A), -8;
-            shl Rq(TEMP_A), 1;
-
-            // ------------------------------------
             // 3. Add the risc32 byte offset to the physical memory pointer
             //
             // TEMP_A = addr + physical_memory_pointer
@@ -1312,8 +1251,11 @@ impl MemoryInstructions for TranspilerBackend {
 
             // ------------------------------------
             // 4. Load the word from physical memory into TEMP_A (sign-extended to 64-bit)
+            //
+            // UNTRUSTED: when tracing is disabled, memory READ
+            // permission failure will be triggered here.
             // ------------------------------------
-            movsxd Rq(TEMP_A), DWORD [Rq(TEMP_A) + 8 + rax]
+            movsxd Rq(TEMP_A), DWORD [Rq(TEMP_A)]
         }
 
         // ------------------------------------
@@ -1344,20 +1286,6 @@ impl MemoryInstructions for TranspilerBackend {
             add Rq(TEMP_A), imm as i32;
 
             // ------------------------------------
-            // Store the intra-word offset.
-            // ------------------------------------
-            mov rax, Rq(TEMP_A);
-            and rax, 7;
-
-            // ------------------------------------
-            // Align to the start of the word.
-            //
-            // Scale to account for the entry size.
-            // ------------------------------------
-            and Rq(TEMP_A), -8;
-            shl Rq(TEMP_A), 1;
-
-            // ------------------------------------
             // 3. Add the risc32 byte offset to the physical memory pointer
             //
             // TEMP_A = addr + physical_memory_pointer
@@ -1366,8 +1294,11 @@ impl MemoryInstructions for TranspilerBackend {
 
             // ------------------------------------
             // 4. Load the word from physical memory into TEMP_B (zero-extended to 64-bit)
+            //
+            // UNTRUSTED: when tracing is disabled, memory READ
+            // permission failure will be triggered here.
             // ------------------------------------
-            mov Rd(TEMP_A), DWORD [Rq(TEMP_A) + 8 + rax]
+            mov Rd(TEMP_A), DWORD [Rq(TEMP_A)]
         }
 
         // ------------------------------------
@@ -1398,13 +1329,6 @@ impl MemoryInstructions for TranspilerBackend {
             add Rq(TEMP_A), imm as i32;
 
             // ------------------------------------
-            // Scale to account for the entry size.
-            //
-            // Assume the addr is properly aligned.
-            // ------------------------------------
-            shl Rq(TEMP_A), 1;
-
-            // ------------------------------------
             // Add the risc byte offset to the physical memory pointer
             //
             // TEMP_A = addr + physical_memory_pointer
@@ -1413,8 +1337,11 @@ impl MemoryInstructions for TranspilerBackend {
 
             // ------------------------------------
             // Load the word from physical memory into TEMP_A
+            //
+            // UNTRUSTED: when tracing is disabled, memory READ
+            // permission failure will be triggered here.
             // ------------------------------------
-            mov Rq(TEMP_A), QWORD [Rq(TEMP_A) + 8]
+            mov Rq(TEMP_A), QWORD [Rq(TEMP_A)]
         }
 
         // ------------------------------------
@@ -1443,20 +1370,6 @@ impl MemoryInstructions for TranspilerBackend {
             add Rq(TEMP_A), imm as i32;
 
             // ------------------------------------
-            // Store the intra-word offset.
-            // ------------------------------------
-            mov rax, Rq(TEMP_A);
-            and rax, 7;
-
-            // ------------------------------------
-            // Align to the start of the word.
-            //
-            // Scale to account for the entry size.
-            // ------------------------------------
-            and Rq(TEMP_A), -8;
-            shl Rq(TEMP_A), 1;
-
-            // ------------------------------------
             // Add the risc32 byte offset to the physical memory pointer
             // ------------------------------------
             add Rq(TEMP_B), Rq(TEMP_A)
@@ -1474,7 +1387,11 @@ impl MemoryInstructions for TranspilerBackend {
             self;
             .arch x64;
 
-            mov BYTE [Rq(TEMP_B) + 8 + rax], Rb(TEMP_A)
+            // ------------------------------------
+            // UNTRUSTED: when tracing is disabled, memory WRITE
+            // permission failure will be triggered here.
+            // ------------------------------------
+            mov BYTE [Rq(TEMP_B)], Rb(TEMP_A)
         }
     }
 
@@ -1498,19 +1415,6 @@ impl MemoryInstructions for TranspilerBackend {
             add Rq(TEMP_A), imm as i32;
 
             // ------------------------------------
-            // Store the intra-word offset.
-            // ------------------------------------
-            mov rax, Rq(TEMP_A);
-            and rax, 7;
-
-            // ------------------------------------
-            // Align to the start of the word.
-            // Scale to account for the entry size.
-            // ------------------------------------
-            and Rq(TEMP_A), -8;
-            shl Rq(TEMP_A), 1;
-
-            // ------------------------------------
             // Add the risc32 byte offset to the physical memory pointer
             // ------------------------------------
             add Rq(TEMP_B), Rq(TEMP_A)
@@ -1528,7 +1432,11 @@ impl MemoryInstructions for TranspilerBackend {
             self;
             .arch x64;
 
-            mov WORD [Rq(TEMP_B) + 8 + rax], Rw(TEMP_A)
+            // ------------------------------------
+            // UNTRUSTED: when tracing is disabled, memory WRITE
+            // permission failure will be triggered here.
+            // ------------------------------------
+            mov WORD [Rq(TEMP_B)], Rw(TEMP_A)
         }
     }
 
@@ -1552,19 +1460,6 @@ impl MemoryInstructions for TranspilerBackend {
             add Rq(TEMP_A), imm as i32;
 
             // ------------------------------------
-            // Store the intra-word offset.
-            // ------------------------------------
-            mov rax, Rq(TEMP_A);
-            and rax, 7;
-
-            // ------------------------------------
-            // Align to the start of the word.
-            // Scale to account for the entry size.
-            // ------------------------------------
-            and Rq(TEMP_A), -8;
-            shl Rq(TEMP_A), 1;
-
-            // ------------------------------------
             // Add the risc32 byte offset to the physical memory pointer
             // ------------------------------------
             add Rq(TEMP_B), Rq(TEMP_A)
@@ -1582,7 +1477,11 @@ impl MemoryInstructions for TranspilerBackend {
             self;
             .arch x64;
 
-            mov DWORD [Rq(TEMP_B) + 8 + rax], Rd(TEMP_A)
+            // ------------------------------------
+            // UNTRUSTED: when tracing is disabled, memory WRITE
+            // permission failure will be triggered here.
+            // ------------------------------------
+            mov DWORD [Rq(TEMP_B)], Rd(TEMP_A)
         }
     }
 
@@ -1606,13 +1505,6 @@ impl MemoryInstructions for TranspilerBackend {
             add Rq(TEMP_A), imm as i32;
 
             // ------------------------------------
-            // Scale to account for the entry size.
-            //
-            // Assume the addr is properly aligned.
-            // ------------------------------------
-            shl Rq(TEMP_A), 1;
-
-            // ------------------------------------
             // 3. Add the risc32 byte offset to the physical memory pointer
             // ------------------------------------
             add Rq(TEMP_B), Rq(TEMP_A)
@@ -1630,7 +1522,11 @@ impl MemoryInstructions for TranspilerBackend {
             self;
             .arch x64;
 
-            mov QWORD [Rq(TEMP_B) + 8], Rq(TEMP_A)
+            // ------------------------------------
+            // UNTRUSTED: when tracing is disabled, memory WRITE
+            // permission failure will be triggered here.
+            // ------------------------------------
+            mov QWORD [Rq(TEMP_B)], Rq(TEMP_A)
         }
     }
 }
@@ -1658,6 +1554,7 @@ impl SystemInstructions for TranspilerBackend {
         extern "C" fn unimp(ctx: *mut JitContext) {
             let ctx = unsafe { &mut *ctx };
             eprintln!("Unimplemented instruction at pc: {}", ctx.pc);
+            unreachable!();
         }
 
         self.call_extern_fn(unimp);

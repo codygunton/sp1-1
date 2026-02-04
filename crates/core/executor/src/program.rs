@@ -17,6 +17,7 @@ use sp1_hypercube::{
     shape::Shape,
     InteractionKind, UntrustedConfig,
 };
+use sp1_jit::ElfInfo;
 use sp1_primitives::consts::split_page_idx;
 use std::sync::Arc;
 use std::{fs::File, io::Read, str::FromStr};
@@ -97,7 +98,7 @@ impl Program {
         }
 
         // Transpile the RV64IM instructions.
-        let instruction_pair = transpile(&elf.instructions);
+        let instruction_pair = transpile(&elf.instructions, false);
         let (instructions, instructions_encoded): (Vec<Instruction>, Vec<u32>) =
             instruction_pair.into_iter().unzip();
 
@@ -152,6 +153,16 @@ impl Program {
     pub fn fetch(&self, pc: u64) -> Option<&Instruction> {
         let idx = ((pc - self.pc_base) / 4) as usize;
         self.instructions.get(idx)
+    }
+
+    #[must_use]
+    /// Creates a minimal `ElfInfo` for syscalls.
+    pub fn elf_info(&self) -> ElfInfo {
+        ElfInfo {
+            pc_base: self.pc_base,
+            instruction_count: self.instructions.len(),
+            untrusted_memory: self.untrusted_memory,
+        }
     }
 }
 
