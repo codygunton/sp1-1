@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use slop_air::Air;
 use slop_algebra::{AbstractField, Field};
 use slop_alloc::{Backend, CanCopyFromRef, CpuBackend};
-use slop_challenger::GrindingChallenger;
 use slop_challenger::{CanObserve, FieldChallenger, IopCtx, VariableLengthChallenger};
 use slop_commit::Rounds;
 use slop_jagged::{DefaultJaggedProver, JaggedProver, JaggedProverData};
@@ -24,7 +23,6 @@ use std::{
 use thousands::Separable;
 use tracing::Instrument;
 
-use crate::LogupGkrProofGrinding;
 use crate::{
     air::{MachineAir, MachineProgram},
     prover::{
@@ -34,7 +32,7 @@ use crate::{
     septic_digest::SepticDigest,
     AirOpenedValues, Chip, ChipEvaluation, ChipOpenedValues, ChipStatistics,
     ConstraintSumcheckFolder, GkrProverImpl, LogUpEvaluations, Machine, MachineVerifyingKey,
-    ShardContext, ShardOpenedValues, ShardProof, GKR_GRINDING_BITS,
+    ShardContext, ShardOpenedValues, ShardProof,
 };
 
 use super::{TraceGenerator, Traces};
@@ -695,22 +693,6 @@ impl<GC: IopCtx, SC: ShardContext<GC>, C: DefaultJaggedProver<GC, SC::Config>>
             }
         }
 
-        let max_interaction_arity = shard_chips
-            .iter()
-            .flat_map(|c| c.sends().iter().chain(c.receives().iter()))
-            .map(|i| i.values.len() + 1)
-            .max()
-            .unwrap();
-        let beta_seed_dim = max_interaction_arity.next_power_of_two().ilog2();
-
-        let gkr_witness = challenger.grind(GKR_GRINDING_BITS);
-        // Sample the logup challenges.
-        let alpha = challenger.sample_ext_element::<GC::EF>();
-        let beta_seed = (0..beta_seed_dim)
-            .map(|_| challenger.sample_ext_element::<GC::EF>())
-            .collect::<Point<_>>();
-        let _pv_challenge = challenger.sample_ext_element::<GC::EF>();
-
         let logup_gkr_proof = {
             let _span = tracing::debug_span!("logup gkr proof").entered();
             self.inner.logup_gkr_prover.prove_logup_gkr(
@@ -718,8 +700,6 @@ impl<GC: IopCtx, SC: ShardContext<GC>, C: DefaultJaggedProver<GC, SC::Config>>
                 &pk.preprocessed_data.preprocessed_traces,
                 &traces,
                 public_values.clone(),
-                alpha,
-                beta_seed,
                 &mut challenger,
             )
         };
@@ -802,10 +782,7 @@ impl<GC: IopCtx, SC: ShardContext<GC>, C: DefaultJaggedProver<GC, SC::Config>>
         let proof = ShardProof {
             main_commitment: main_commit,
             opened_values: shard_open_values,
-            logup_gkr_proof: LogupGkrProofGrinding {
-                gkr_proof: logup_gkr_proof,
-                witness: gkr_witness,
-            },
+            logup_gkr_proof,
             evaluation_proof,
             zerocheck_proof: zerocheck_partial_sumcheck_proof,
             public_values,

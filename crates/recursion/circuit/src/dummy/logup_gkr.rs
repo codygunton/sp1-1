@@ -5,7 +5,7 @@ use slop_algebra::{ExtensionField, Field};
 use slop_multilinear::Point;
 use sp1_hypercube::{
     air::MachineAir, log2_ceil_usize, Chip, ChipEvaluation, LogUpEvaluations, LogUpGkrOutput,
-    LogupGkrProof, LogupGkrProofGrinding, LogupGkrRoundProof,
+    LogupGkrProof, LogupGkrRoundProof,
 };
 
 use super::sumcheck::dummy_sumcheck_proof;
@@ -13,7 +13,7 @@ use super::sumcheck::dummy_sumcheck_proof;
 pub fn dummy_gkr_proof<F: Field, EF: ExtensionField<F>, A: MachineAir<F>>(
     shard_chips: &BTreeSet<Chip<F, A>>,
     log_max_row_height: usize,
-) -> LogupGkrProofGrinding<F, EF> {
+) -> LogupGkrProof<F, EF> {
     let total_num_interactions =
         shard_chips.iter().map(|chip| chip.num_interactions()).sum::<usize>();
     let output_size = 1 << (log2_ceil_usize(total_num_interactions) + 1);
@@ -55,8 +55,5 @@ pub fn dummy_gkr_proof<F: Field, EF: ExtensionField<F>, A: MachineAir<F>>(
             .collect(),
     };
 
-    LogupGkrProofGrinding {
-        gkr_proof: LogupGkrProof { circuit_output, round_proofs, logup_evaluations },
-        witness: F::zero(),
-    }
+    LogupGkrProof { circuit_output, round_proofs, logup_evaluations, witness: F::zero() }
 }
