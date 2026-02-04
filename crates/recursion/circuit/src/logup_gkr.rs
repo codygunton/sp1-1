@@ -6,7 +6,7 @@ use slop_algebra::AbstractField;
 use slop_multilinear::{full_geq, Mle, MleEval, Point};
 use sp1_hypercube::{
     air::MachineAir, Chip, ChipEvaluation, LogUpEvaluations, LogUpGkrOutput, LogupGkrProof,
-    LogupGkrRoundProof,
+    LogupGkrProofGrinding, LogupGkrRoundProof,
 };
 use sp1_primitives::{SP1ExtensionField, SP1Field};
 use sp1_recursion_compiler::ir::Builder;
@@ -315,5 +315,21 @@ impl<C: CircuitConfig, T: Witnessable<C>> Witnessable<C> for LogupGkrProof<T> {
         self.circuit_output.write(witness);
         self.round_proofs.write(witness);
         self.logup_evaluations.write(witness);
+    }
+}
+
+impl<C: CircuitConfig, T1: Witnessable<C>, T2: Witnessable<C>> Witnessable<C>
+    for LogupGkrProofGrinding<T1, T2>
+{
+    type WitnessVariable = LogupGkrProofGrinding<T1::WitnessVariable, T2::WitnessVariable>;
+
+    fn read(&self, builder: &mut Builder<C>) -> Self::WitnessVariable {
+        let witness = self.witness.read(builder);
+        let gkr_proof = self.gkr_proof.read(builder);
+        Self::WitnessVariable { witness, gkr_proof }
+    }
+    fn write(&self, witness: &mut impl WitnessWriter<C>) {
+        self.witness.write(witness);
+        self.gkr_proof.write(witness);
     }
 }

@@ -79,7 +79,7 @@ where
         proof: &LogupGkrProof<EF>,
         challenger: &mut impl FieldChallenger<F>,
     ) -> Result<(), LogupGkrVerificationError<EF>> {
-        let LogupGkrProof { circuit_output, round_proofs, logup_evaluations } = proof;
+        let LogupGkrProof { circuit_output, round_proofs, logup_evaluations, .. } = proof;
 
         let LogUpGkrOutput { numerator, denominator } = circuit_output;
 

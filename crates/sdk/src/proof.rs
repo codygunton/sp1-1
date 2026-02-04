@@ -18,8 +18,8 @@ use slop_sumcheck::PartialSumcheckProof;
 use slop_tensor::Tensor;
 use sp1_hypercube::SP1PcsProof;
 use sp1_hypercube::{
-    LogUpEvaluations, LogUpGkrOutput, LogupGkrProof, MerkleProof, SP1PcsProofInner,
-    SP1RecursionProof, ShardOpenedValues, ShardProof, DIGEST_SIZE,
+    LogUpEvaluations, LogUpGkrOutput, LogupGkrProof, LogupGkrProofGrinding, MerkleProof,
+    SP1PcsProofInner, SP1RecursionProof, ShardOpenedValues, ShardProof, DIGEST_SIZE,
 };
 use sp1_primitives::{io::SP1PublicValues, SP1ExtensionField, SP1Field, SP1GlobalContext};
 use sp1_prover::{Groth16Bn254Proof, HashableKey, PlonkBn254Proof, SP1VerifyingKey};
@@ -72,15 +72,18 @@ fn create_dummy_recursion_proof(
     // Create empty Mle with minimal size using Tensor::zeros_in.
     let empty_tensor: Tensor<SP1ExtensionField, CpuBackend> =
         Tensor::zeros_in([1], GLOBAL_CPU_BACKEND);
-    let logup_gkr_proof = LogupGkrProof {
-        circuit_output: LogUpGkrOutput {
-            numerator: Mle::new(empty_tensor.clone()),
-            denominator: Mle::new(empty_tensor),
-        },
-        round_proofs: vec![],
-        logup_evaluations: LogUpEvaluations {
-            point: Point::from_usize(0, 1),
-            chip_openings: BTreeMap::new(),
+    let logup_gkr_proof = LogupGkrProofGrinding {
+        witness: SP1Field::zero(),
+        gkr_proof: LogupGkrProof {
+            circuit_output: LogUpGkrOutput {
+                numerator: Mle::new(empty_tensor.clone()),
+                denominator: Mle::new(empty_tensor),
+            },
+            round_proofs: vec![],
+            logup_evaluations: LogUpEvaluations {
+                point: Point::from_usize(0, 1),
+                chip_openings: BTreeMap::new(),
+            },
         },
     };
 

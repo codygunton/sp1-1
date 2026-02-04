@@ -41,6 +41,15 @@ pub struct LogupGkrProof<EF> {
     pub logup_evaluations: LogUpEvaluations<EF>,
 }
 
+/// The proof for the log-up GKR circuit with the grinding witness.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LogupGkrProofGrinding<F, EF> {
+    /// The grinding witness.
+    pub witness: F,
+    /// The log-up GKR proof.
+    pub gkr_proof: LogupGkrProof<EF>,
+}
+
 /// The evaluations for a chip
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ChipEvaluation<EF> {

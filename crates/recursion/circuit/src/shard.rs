@@ -1,8 +1,3 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    marker::PhantomData,
-};
-
 use crate::{
     basefold::RecursiveBasefoldProof,
     challenger::{CanObserveVariable, FieldChallengerVariable},
@@ -20,9 +15,10 @@ use slop_challenger::IopCtx;
 use slop_commit::Rounds;
 use slop_multilinear::{Evaluations, MleEval, Point};
 use slop_sumcheck::PartialSumcheckProof;
+use sp1_hypercube::GKR_GRINDING_BITS;
 use sp1_hypercube::{
     air::MachineAir, septic_digest::SepticDigest, GenericVerifierPublicValuesConstraintFolder,
-    LogupGkrProof, Machine, MachineRecord, ShardOpenedValues,
+    LogupGkrProofGrinding, Machine, MachineRecord, ShardOpenedValues,
 };
 use sp1_primitives::{SP1ExtensionField, SP1Field};
 use sp1_recursion_compiler::{
@@ -31,6 +27,10 @@ use sp1_recursion_compiler::{
     prelude::{Ext, SymbolicFelt},
 };
 use sp1_recursion_executor::{DIGEST_SIZE, NUM_BITS};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    marker::PhantomData,
+};
 
 #[allow(clippy::type_complexity)]
 pub struct ShardProofVariable<C: CircuitConfig, SC: SP1FieldConfigVariable<C> + Send + Sync> {
@@ -43,7 +43,7 @@ pub struct ShardProofVariable<C: CircuitConfig, SC: SP1FieldConfigVariable<C> + 
     /// The public values
     pub public_values: Vec<Felt<SP1Field>>,
     // TODO: The `LogUp+GKR` IOP proofs.
-    pub logup_gkr_proof: LogupGkrProof<Ext<SP1Field, SP1ExtensionField>>,
+    pub logup_gkr_proof: LogupGkrProofGrinding<Felt<SP1Field>, Ext<SP1Field, SP1ExtensionField>>,
     /// The evaluation proof.
     pub evaluation_proof: JaggedPcsProofVariable<RecursiveBasefoldProof<C, SC>, SC::DigestVariable>,
 }
@@ -193,6 +193,10 @@ where
             .cloned()
             .collect::<BTreeSet<_>>();
 
+        // Check proof of work (grinding to find a number that hashes to have
+        // `self.config.proof_of_work_bits` zeroes at the beginning).
+        challenger.check_witness(builder, GKR_GRINDING_BITS, logup_gkr_proof.witness);
+
         // Sample the permutation challenges.
         let alpha = challenger.sample_ext(builder);
         let max_interaction_arity = shard_chips
@@ -226,7 +230,7 @@ where
             beta_seed,
             cumulative_sum,
             max_log_row_count,
-            logup_gkr_proof,
+            &logup_gkr_proof.gkr_proof,
             challenger,
         );
         builder.cycle_tracker_v2_exit();
@@ -237,7 +241,7 @@ where
             builder,
             &shard_chips,
             opened_values,
-            &logup_gkr_proof.logup_evaluations,
+            &logup_gkr_proof.gkr_proof.logup_evaluations,
             zerocheck_proof,
             public_values,
             challenger,

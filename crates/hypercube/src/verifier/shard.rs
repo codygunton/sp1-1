@@ -1,5 +1,6 @@
 use derive_where::derive_where;
 use slop_basefold::FriConfig;
+use slop_challenger::GrindingChallenger;
 use slop_merkle_tree::MerkleTreeTcs;
 #[allow(clippy::disallowed_types)]
 use slop_stacked::{StackedBasefoldProof, StackedPcsVerifier};
@@ -38,6 +39,9 @@ use crate::record::MachineRecord;
 /// The number of commitments in an SP1 shard proof, corresponding to the preprocessed and main
 /// commitments.
 pub const NUM_SP1_COMMITMENTS: usize = 2;
+
+/// The number of bits to grind in sampling the GKR randomness.
+pub const GKR_GRINDING_BITS: usize = 12;
 
 #[allow(clippy::disallowed_types)]
 /// The Multilinear PCS used in SP1 shard proofs, generic in the `IopCtx`.
@@ -114,6 +118,9 @@ pub enum ShardVerifierError<EF, PcsError> {
     /// The height is larger than `1 << max_log_row_count`.
     #[error("height is larger than maximum possible value")]
     HeightTooLarge,
+    /// Invalid grinding witness.
+    #[error("Invalid proof of work witness")]
+    Pow,
 }
 
 /// Derive the error type from the jagged config.
@@ -575,6 +582,12 @@ where {
         let beta_seed_dim =
             max(max_interaction_arity, max_interaction_kinds_values).next_power_of_two().ilog2();
 
+        // Check proof of work (grinding to find a number that hashes to have
+        // `GKR_GRINDING_BITS` zeroes at the beginning).
+        if !challenger.check_witness(GKR_GRINDING_BITS, logup_gkr_proof.witness) {
+            return Err(ShardVerifierError::Pow);
+        }
+
         let alpha = challenger.sample_ext_element::<GC::EF>();
         let beta_seed = (0..beta_seed_dim)
             .map(|_| challenger.sample_ext_element::<GC::EF>())
@@ -593,7 +606,7 @@ where {
 
         if shard_chips.len() != opened_values.chips.len()
             || shard_chips.len() != degrees.len()
-            || shard_chips.len() != logup_gkr_proof.logup_evaluations.chip_openings.len()
+            || shard_chips.len() != logup_gkr_proof.gkr_proof.logup_evaluations.chip_openings.len()
         {
             return Err(ShardVerifierError::InvalidShape);
         }
@@ -601,7 +614,7 @@ where {
         for ((shard_chip, (chip_name, _)), (gkr_chip_name, gkr_opened_values)) in shard_chips
             .iter()
             .zip_eq(opened_values.chips.iter())
-            .zip_eq(logup_gkr_proof.logup_evaluations.chip_openings.iter())
+            .zip_eq(logup_gkr_proof.gkr_proof.logup_evaluations.chip_openings.iter())
         {
             if shard_chip.name() != chip_name.as_str() {
                 return Err(ShardVerifierError::InvalidChipOrder(
@@ -638,7 +651,7 @@ where {
             &beta_seed,
             cumulative_sum,
             max_log_row_count,
-            logup_gkr_proof,
+            &logup_gkr_proof.gkr_proof,
             challenger,
         )
         .map_err(ShardVerifierError::GkrVerificationFailed)?;
@@ -647,7 +660,7 @@ where {
         self.verify_zerocheck(
             &shard_chips,
             opened_values,
-            &logup_gkr_proof.logup_evaluations,
+            &logup_gkr_proof.gkr_proof.logup_evaluations,
             proof,
             public_values,
             challenger,

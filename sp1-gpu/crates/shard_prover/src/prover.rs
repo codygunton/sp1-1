@@ -11,7 +11,9 @@ use slop_jagged::{
 use slop_multilinear::{Evaluations, MleEval, MultilinearPcsVerifier, Point};
 use sp1_gpu_air::air_block::BlockAir;
 use sp1_gpu_air::SymbolicProverFolder;
-use sp1_gpu_basefold::{CudaStackedPcsProverData, DeviceGrindingChallenger, FriCudaProver};
+use sp1_gpu_basefold::{
+    CudaStackedPcsProverData, DeviceGrindingChallenger, FriCudaProver, GrindingPowCudaProver,
+};
 use sp1_gpu_challenger::FromHostChallengerSync;
 use sp1_gpu_cudart::PinnedBuffer;
 use sp1_gpu_cudart::{DeviceMle, DevicePoint, TaskScope};
@@ -30,7 +32,7 @@ use sp1_hypercube::{
     prover::{AirProver, PreprocessedData, ProverPermit, ProverSemaphore, ProvingKey},
     Machine, MachineVerifyingKey, ShardProof,
 };
-use sp1_hypercube::{SP1PcsProof, ShardContextImpl};
+use sp1_hypercube::{LogupGkrProofGrinding, SP1PcsProof, ShardContextImpl, GKR_GRINDING_BITS};
 use std::collections::BTreeMap;
 use std::iter::once;
 use std::{marker::PhantomData, sync::Arc};
@@ -678,6 +680,9 @@ impl<GC: IopCtx<F = Felt, EF = Ext>, PC: CudaShardProverComponents<GC>>
             .unwrap();
         let beta_seed_dim = max_interaction_arity.next_power_of_two().ilog2();
 
+        let scope = traces.dense().dense.backend().clone();
+        let gkr_witness = GrindingPowCudaProver::grind(&mut challenger, GKR_GRINDING_BITS, &scope);
+
         // Sample the logup challenges.
         let alpha = challenger.sample_ext_element::<GC::EF>();
 
@@ -775,7 +780,10 @@ impl<GC: IopCtx<F = Felt, EF = Ext>, PC: CudaShardProverComponents<GC>>
         let proof = ShardProof {
             main_commitment: main_commit,
             opened_values: shard_open_values,
-            logup_gkr_proof,
+            logup_gkr_proof: LogupGkrProofGrinding {
+                witness: gkr_witness,
+                gkr_proof: logup_gkr_proof,
+            },
             evaluation_proof,
             zerocheck_proof: zerocheck_partial_sumcheck_proof,
             public_values,
