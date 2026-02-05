@@ -7325,6 +7325,7 @@ name = "sp1-hypercube"
 version = "6.0.0-rc.1"
 dependencies = [
  "arrayref",
+ "bincode",
  "deepsize2",
  "derive-where",
  "futures",

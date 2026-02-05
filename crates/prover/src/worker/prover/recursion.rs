@@ -575,7 +575,7 @@ impl<A: ArtifactClient, C: SP1ProverComponents> SP1RecursionProver<A, C> {
                 config.clone(),
             ));
 
-            let expected_wrap_vk = bincode::deserialize(WRAP_VK_BYTES).unwrap();
+            let expected_wrap_vk = MachineVerifyingKey::deserialize(WRAP_VK_BYTES);
             let wrap_prover_init = WrapProverInit {
                 wrap_air_prover: wrap_air_prover_init,
                 config: config.clone(),

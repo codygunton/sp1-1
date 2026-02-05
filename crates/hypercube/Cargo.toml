@@ -57,6 +57,7 @@ num-bigint = { workspace = true }
 strum = { workspace = true, features = ["derive"] }
 num-traits = { workspace = true }
 num_cpus = { workspace = true }
+bincode = { workspace = true }
 
 # async
 tokio = { workspace = true, features = ["rt", "sync", "time"] }

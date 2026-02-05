@@ -75,6 +75,37 @@ pub struct MachineVerifyingKey<C: IopCtx> {
     pub untrusted_config: UntrustedConfig<C::F>,
 }
 
+impl<C: IopCtx> MachineVerifyingKey<C> {
+    /// Deserialize MachineVerifyingKey with optional support for older formats.
+    pub fn deserialize(data: &[u8]) -> Self {
+        match bincode::deserialize(data) {
+            Ok(key) => key,
+            Err(_) => {
+                let old_key: MachineVerifyingOldKey<C> = bincode::deserialize(data).unwrap();
+                MachineVerifyingKey {
+                    pc_start: old_key.pc_start,
+                    initial_global_cumulative_sum: old_key.initial_global_cumulative_sum,
+                    preprocessed_commit: old_key.preprocessed_commit,
+                    untrusted_config: UntrustedConfig::zero(),
+                }
+            }
+        }
+    }
+}
+
+/// Old verifying key format.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MachineVerifyingOldKey<C: IopCtx> {
+    /// The start pc of the program.
+    pub pc_start: [C::F; 3],
+    /// The starting global digest of the program, after incorporating the initial memory.
+    pub initial_global_cumulative_sum: SepticDigest<C::F>,
+    /// The preprocessed commitments.
+    pub preprocessed_commit: C::Digest,
+    /// Flag indicating if untrusted programs are allowed.
+    pub enable_untrusted_programs: C::F,
+}
+
 impl<C: IopCtx> PartialEq for MachineVerifyingKey<C> {
     fn eq(&self, other: &Self) -> bool {
         self.pc_start == other.pc_start

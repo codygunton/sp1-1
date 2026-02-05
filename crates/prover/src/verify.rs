@@ -80,7 +80,7 @@ impl SP1Verifier {
         let wrap = CpuSP1ProverComponents::wrap_verifier();
 
         // Get the wrap vk from the associated constant.
-        let wrap_vk = bincode::deserialize(WRAP_VK_BYTES).unwrap();
+        let wrap_vk = MachineVerifyingKey::deserialize(WRAP_VK_BYTES);
 
         Self { core, compress, shrink, wrap, recursion_vks, shrink_vk: None, wrap_vk }
     }

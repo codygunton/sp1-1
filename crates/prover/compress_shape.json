@@ -4,11 +4,11 @@
       "BaseAlu": 584608,
       "ExtAlu": 998528,
       "MemoryConst": 492416,
-      "MemoryVar": 663136,
+      "MemoryVar": 664136,
       "Poseidon2WideDeg3": 158400,
       "PrefixSumChecks": 254400,
       "PublicValues": 16,
-      "Select": 1087808
+      "Select": 1088808
     },
     "_marker": null
   }
