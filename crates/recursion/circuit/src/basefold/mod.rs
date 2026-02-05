@@ -145,6 +145,8 @@ impl<C: CircuitConfig, SC: SP1FieldConfigVariable<C>> RecursiveBasefoldVerifier<
         let batching_coefficients_symbolic =
             partial_lagrange_blocking(&batching_point_symbolic).into_buffer().into_vec();
 
+        // Force modular reduction the batching coefficients since they are used repeatedly later on
+        // which would save redundant reductions in the later computations.
         let batching_coefficients: Vec<Ext<SP1Field, SP1ExtensionField>> =
             batching_coefficients_symbolic
                 .into_iter()
