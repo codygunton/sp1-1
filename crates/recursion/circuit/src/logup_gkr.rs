@@ -75,7 +75,7 @@ where
         let LogUpGkrOutput { numerator, denominator } = circuit_output;
 
         // Check proof of work (grinding to find a number that hashes to have
-        // `self.config.proof_of_work_bits` zeroes at the beginning).
+        // `GKR_GRINDING_BITS` zeroes at the beginning).
         challenger.check_witness(builder, GKR_GRINDING_BITS, *witness);
 
         // Sample the permutation challenges.
