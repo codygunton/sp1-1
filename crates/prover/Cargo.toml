@@ -51,10 +51,11 @@ tokio = { workspace = true, features = [
     "rt",
     "sync",
     "fs",
-    "process",
 ] }
+flate2 = { workspace = true }
 futures = { workspace = true }
 serial_test = { workspace = true }
+tar = { workspace = true }
 num-bigint = { workspace = true }
 thiserror = { workspace = true }
 sysinfo = { workspace = true }

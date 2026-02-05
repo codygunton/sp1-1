@@ -38,7 +38,6 @@ use {
     reqwest::Client,
     std::cmp::min,
     tokio::io::AsyncWriteExt,
-    tokio::process::Command,
 };
 
 use crate::{
@@ -412,26 +411,29 @@ pub async fn install_circuit_artifacts(build_dir: PathBuf, artifacts_type: &str)
     download_file(&client, &download_url, &mut file).await?;
     file.flush().await?;
 
-    // Extract the tarball to the build directory.
-    let tar_path_str = tar_path
-        .to_str()
-        .ok_or_else(|| anyhow!("failed to convert path to string: {:?}", tar_path))?;
-    let build_dir_str = build_dir
-        .to_str()
-        .ok_or_else(|| anyhow!("failed to convert path to string: {:?}", build_dir))?;
+    // Close the file handle before extraction.
+    drop(file);
 
-    let res =
-        Command::new("tar").args(["-Pxzf", tar_path_str, "-C", build_dir_str]).output().await?;
+    // Extract the tarball to the build directory using Rust crates.
+    let build_dir_clone = build_dir.clone();
+    let tar_path_clone = tar_path.clone();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let tar_gz = std::fs::File::open(&tar_path_clone)
+            .with_context(|| format!("failed to open tarball: {:?}", tar_path_clone))?;
+        let decompressor = flate2::read::GzDecoder::new(tar_gz);
+        let mut archive = tar::Archive::new(decompressor);
+        archive.unpack(&build_dir_clone).with_context(|| {
+            format!("failed to extract tarball to {}", build_dir_clone.display())
+        })?;
+        Ok(())
+    })
+    .await
+    .context("tar extraction task panicked")??;
 
     // Remove the tarball after extraction.
     tokio::fs::remove_file(&tar_path).await?;
 
-    if !res.status.success() {
-        let stderr = String::from_utf8_lossy(&res.stderr);
-        return Err(anyhow!("failed to extract tarball to {}: {}", build_dir_str, stderr));
-    }
-
-    eprintln!("[sp1] downloaded {} to {}", download_url, build_dir_str);
+    eprintln!("[sp1] downloaded {} to {}", download_url, build_dir.display());
     Ok(())
 }
 
