@@ -427,7 +427,8 @@ pub async fn install_circuit_artifacts(build_dir: PathBuf, artifacts_type: &str)
     tokio::fs::remove_file(&tar_path).await?;
 
     if !res.status.success() {
-        return Err(anyhow!("failed to extract tarball to {}", build_dir_str));
+        let stderr = String::from_utf8_lossy(&res.stderr);
+        return Err(anyhow!("failed to extract tarball to {}: {}", build_dir_str, stderr));
     }
 
     eprintln!("[sp1] downloaded {} to {}", download_url, build_dir_str);
