@@ -142,8 +142,18 @@ impl<C: CircuitConfig, SC: SP1FieldConfigVariable<C>> RecursiveBasefoldVerifier<
         let batching_point: Point<Ext<SP1Field, SP1ExtensionField>> =
             Point::from_iter((0..num_batching_variables).map(|_| challenger.sample_ext(builder)));
         let batching_point_symbolic = IntoSymbolic::<C>::as_symbolic(&batching_point);
-        let batching_coefficients =
+        let batching_coefficients_symbolic =
             partial_lagrange_blocking(&batching_point_symbolic).into_buffer().into_vec();
+
+        let batching_coefficients: Vec<Ext<SP1Field, SP1ExtensionField>> =
+            batching_coefficients_symbolic
+                .into_iter()
+                .map(|x| {
+                    let element = x.as_ext().expect("lagrange coefficient should be a variable");
+                    builder.reduce_e(element);
+                    element
+                })
+                .collect();
 
         builder.cycle_tracker_v2_enter("compute eval_claim");
         // Compute the batched evaluation claim.
