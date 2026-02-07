@@ -24,6 +24,7 @@ use slop_futures::pipeline::{
     SubmitHandle,
 };
 use sp1_hypercube::{
+    air::POSEIDON_NUM_WORDS,
     inner_perm, koalabears_to_bn254,
     prover::{AirProver, ProverSemaphore, ProvingKey},
     HashableKey, MachineProof, MachineVerifier, MachineVerifyingKey, MerkleProof, SP1PcsProofInner,
@@ -874,7 +875,7 @@ impl<A: ArtifactClient, C: SP1ProverComponents> SP1RecursionProver<A, C> {
         // - For precompile shards: they are ordered first in the deferred tree so their number
         //   of accumulated deferred proofs is 0 and deferred_proofs_digest is the initial digest
         let (num_deferred_proofs, reconstruct_deferred_digest) = if is_precompile {
-            (SP1Field::zero(), [SP1Field::zero(); DIGEST_SIZE])
+            (SP1Field::zero(), [SP1Field::zero(); POSEIDON_NUM_WORDS])
         } else {
             (
                 SP1Field::from_canonical_usize(common_input.num_deferred_proofs),
