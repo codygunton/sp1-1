@@ -10,8 +10,8 @@ use crate::{
     shapes::SP1RecursionProofShape,
     verify::WRAP_VK_BYTES,
     worker::{
-        CommonProverInput, ProverMetrics, RangeProofs, RawTaskRequest, TaskContext, TaskError,
-        TaskMetadata, WrapAirProverInit,
+        CommonProverInput, DeferredInputs, ProverMetrics, RangeProofs, RawTaskRequest, TaskContext,
+        TaskError, TaskMetadata, WrapAirProverInit,
     },
     RecursionSC, SP1CircuitWitness, SP1ProverComponents,
 };
@@ -24,7 +24,6 @@ use slop_futures::pipeline::{
     SubmitHandle,
 };
 use sp1_hypercube::{
-    air::POSEIDON_NUM_WORDS,
     inner_perm, koalabears_to_bn254,
     prover::{AirProver, ProverSemaphore, ProvingKey},
     HashableKey, MachineProof, MachineVerifier, MachineVerifyingKey, MerkleProof, SP1PcsProofInner,
@@ -875,7 +874,7 @@ impl<A: ArtifactClient, C: SP1ProverComponents> SP1RecursionProver<A, C> {
         // - For precompile shards: they are ordered first in the deferred tree so their number
         //   of accumulated deferred proofs is 0 and deferred_proofs_digest is the initial digest
         let (num_deferred_proofs, reconstruct_deferred_digest) = if is_precompile {
-            (SP1Field::zero(), [SP1Field::zero(); POSEIDON_NUM_WORDS])
+            (SP1Field::zero(), DeferredInputs::initial_deferred_digest())
         } else {
             (
                 SP1Field::from_canonical_usize(common_input.num_deferred_proofs),
