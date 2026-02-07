@@ -36,7 +36,6 @@ members = [
   "sha2",
   "ssz-withdrawals",
   "tendermint-benchmark",
-  "u256x2048-mul",
   "uint256-arith",
   "uint256-mul",
   "verify-proof",
