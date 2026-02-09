@@ -12,7 +12,7 @@ fn test_chunk_stops_correctly() {
     let program = Program::from(&KECCAK256_ELF).unwrap();
     let program = Arc::new(program);
 
-    let mut executor = MinimalExecutor::new(program.clone(), true, Some(30));
+    let mut executor = MinimalExecutor::new(program.clone(), true, Some(10));
     executor.with_input(&serialize(&5_usize).unwrap());
     for i in 0..5 {
         executor.with_input(&serialize(&vec![i; i]).unwrap());
