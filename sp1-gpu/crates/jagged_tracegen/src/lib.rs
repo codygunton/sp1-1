@@ -290,7 +290,7 @@ async fn generate_jagged_traces(
         let num_added_cols = num_added_vals.div_ceil(1 << max_log_row_count);
         let remainder = num_added_vals % (1 << max_log_row_count);
         if next_multiple == offset {
-            tracing::warn!("Adding 0 columns to the jagged trace");
+            tracing::warn!("Perfect multiple of 2^{}", log_stacking_height);
             let end_idx = (offset >> 1) as u32;
             unsafe {
                 backend
@@ -1016,33 +1016,156 @@ fn log_chip_stats<A: CudaTracegenAir<Felt>>(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::Arc;
 
     use slop_algebra::PrimeField32;
+    use slop_futures::queue::WorkerQueue;
+    use slop_multilinear::{Mle, Point};
     use slop_tensor::Tensor;
 
     use serial_test::serial;
     use slop_algebra::AbstractField;
-    use slop_alloc::Buffer;
-    use sp1_gpu_cudart::{run_in_place, DeviceBuffer, DeviceTensor, TaskScope};
+    use slop_alloc::{Buffer, GLOBAL_CPU_BACKEND};
+    use sp1_gpu_cudart::sys::v2_kernels::jagged_eval_kernel_chunked_felt;
+    use sp1_gpu_cudart::{
+        run_in_place, DeviceBuffer, DevicePoint, DeviceTensor, PinnedBuffer, TaskScope,
+    };
     use sp1_gpu_tracing::init_tracer;
-    use sp1_gpu_utils::Felt;
+    use sp1_gpu_utils::{Ext, Felt};
+    use sp1_gpu_zerocheck::primitives::evaluate_jagged_mle_chunked;
+    use sp1_hypercube::prover::{DefaultTraceGenerator, ProverSemaphore, TraceGenerator};
 
-    use crate::{count_and_add, fill_buf, generate_jagged_traces, Trace};
+    use crate::test_utils::tracegen_setup::{self, CORE_MAX_LOG_ROW_COUNT, LOG_STACKING_HEIGHT};
+    use crate::{
+        count_and_add, fill_buf, full_tracegen, generate_jagged_traces, Trace, CORE_MAX_TRACE_SIZE,
+    };
 
     use rand::SeedableRng;
     use rand::{rngs::StdRng, Rng};
 
     /// Takes a pre-generated proof and vk, and generates traces for the shrink program.
     /// Then, asserts that the jagged traces generated are the same as the traces in the old format.
-    /// TODO(sync): This test requires async trait implementations (PartialLagrangeBackend,
-    /// AddAssignBackend, MleEvaluationBackend) for TaskScope that were removed in the sync refactor.
-    /// The test body is commented out because #[ignore] doesn't prevent compilation.
     #[tokio::test]
     #[serial]
-    #[ignore = "requires async trait implementations for TaskScope"]
     async fn test_jagged_tracegen() {
-        // Test body commented out - requires async trait implementations that were removed.
-        // See the git history for the original test implementation.
+        sp1_core_machine::utils::setup_logger();
+        let (machine, record, program) = tracegen_setup::setup().await;
+
+        let mut rng = StdRng::seed_from_u64(4);
+        run_in_place(|scope| async move {
+            let z_row: Point<Ext, _> = Point::rand(&mut rng, CORE_MAX_LOG_ROW_COUNT);
+
+            let semaphore = ProverSemaphore::new(1);
+
+            // Generate traces using the host tracegen.
+            let trace_generator =
+                DefaultTraceGenerator::new_in(machine.clone(), GLOBAL_CPU_BACKEND);
+
+            scope.synchronize().await.unwrap();
+            let now = std::time::Instant::now();
+            let old_traces = trace_generator
+                .generate_traces(
+                    program.clone(),
+                    record.clone(),
+                    CORE_MAX_LOG_ROW_COUNT as usize,
+                    semaphore.clone(),
+                )
+                .await;
+            scope.synchronize().await.unwrap();
+            tracing::info!("host traces generated in {:?}", now.elapsed());
+
+            let record = Arc::new(record);
+
+            let mut num_cols = 0;
+            let mut all_evals_host = vec![];
+
+            // Evaluate all of the real traces at z_row. Concatenate evaluations into `all_evals_host`.
+            for trace in old_traces.preprocessed_traces.values() {
+                assert_eq!(trace.num_variables(), CORE_MAX_LOG_ROW_COUNT);
+
+                let trace = trace.eval_at(&z_row);
+
+                num_cols += trace.num_polynomials();
+                let tensor = trace.into_evaluations();
+
+                all_evals_host.extend_from_slice(tensor.as_buffer());
+            }
+
+            // Add zero evaluation for preprocessed padding to next multiple of 2^log stacking height.
+            num_cols += 1;
+            all_evals_host.extend_from_slice(&[Ext::zero()]);
+
+            for trace in old_traces.main_trace_data.traces.values() {
+                assert_eq!(trace.num_variables(), CORE_MAX_LOG_ROW_COUNT);
+
+                let trace = trace.eval_at(&z_row);
+
+                num_cols += trace.num_polynomials();
+                let tensor = trace.into_evaluations();
+
+                all_evals_host.extend_from_slice(tensor.as_buffer());
+            }
+
+            num_cols += 1;
+            all_evals_host.extend_from_slice(&[Ext::zero()]);
+
+            // Evaluate `all_evals_host` as an MLE at z_col.
+            let all_evals_mle = Mle::from_buffer(all_evals_host.into());
+            let num_col_variables = num_cols.next_power_of_two().ilog2();
+            let z_col: Point<Ext, _> = Point::rand(&mut rng, num_col_variables);
+            let old_tracegen_eval = all_evals_mle.eval_at(&z_col).evaluations().as_slice()[0];
+
+            scope.synchronize().await.unwrap();
+            drop(old_traces.main_trace_data.permit);
+            let now = std::time::Instant::now();
+
+            let capacity = CORE_MAX_TRACE_SIZE as usize;
+            let buffer = PinnedBuffer::<Felt>::with_capacity(capacity);
+            let queue = Arc::new(WorkerQueue::new(vec![buffer]));
+            let buffer = queue.pop().await.unwrap();
+
+            // Do tracegen with the new setup.
+            let (_public_values, jagged_trace_data, _chip_set_, _permit) = full_tracegen(
+                &machine,
+                program.clone(),
+                record,
+                &buffer,
+                CORE_MAX_TRACE_SIZE as usize,
+                LOG_STACKING_HEIGHT,
+                CORE_MAX_LOG_ROW_COUNT,
+                &scope,
+                semaphore.clone(),
+                false,
+            )
+            .await;
+
+            scope.synchronize().await.unwrap();
+            tracing::info!(
+                "new traces generated in ( inaccurate, needs warmup ) {:?}",
+                now.elapsed()
+            );
+
+            let num_dense_cols = jagged_trace_data.start_indices.len() - 1;
+            tracing::info!("num dense cols: {}", num_dense_cols);
+
+            let z_row_device = DevicePoint::from_host(&z_row, &scope).unwrap().into_inner();
+            let z_col_device = DevicePoint::from_host(&z_col, &scope).unwrap().into_inner();
+
+            let total_len = jagged_trace_data.dense_data.dense.len() / 2;
+            tracing::info!("total len: {}", total_len);
+            let zerocheck_eval = evaluate_jagged_mle_chunked(
+                jagged_trace_data,
+                z_row_device,
+                z_col_device,
+                num_dense_cols,
+                total_len,
+                jagged_eval_kernel_chunked_felt,
+            );
+
+            let zerocheck_eval_host = DeviceTensor::from_raw(zerocheck_eval).to_host().unwrap();
+            assert_eq!(old_tracegen_eval, zerocheck_eval_host.as_slice()[0]);
+        })
+        .await;
     }
 
     #[tokio::test]
