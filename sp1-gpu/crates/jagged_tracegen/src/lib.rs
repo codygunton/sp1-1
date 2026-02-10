@@ -290,6 +290,7 @@ async fn generate_jagged_traces(
         let num_added_cols = num_added_vals.div_ceil(1 << max_log_row_count);
         let remainder = num_added_vals % (1 << max_log_row_count);
         if next_multiple == offset {
+            tracing::warn!("Adding 0 columns to the jagged trace");
             let end_idx = (offset >> 1) as u32;
             unsafe {
                 backend
@@ -1082,8 +1083,7 @@ mod tests {
 
             let mut dense_data: Buffer<Felt, TaskScope> =
                 Buffer::with_capacity_in(16, scope.clone());
-            let mut col_index: Buffer<u32, TaskScope> =
-                Buffer::with_capacity_in(8, scope.clone());
+            let mut col_index: Buffer<u32, TaskScope> = Buffer::with_capacity_in(8, scope.clone());
 
             let sentinel = 0xDEADBEEFu32;
             let host_start = vec![sentinel; 4];
