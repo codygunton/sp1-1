@@ -290,8 +290,17 @@ async fn generate_jagged_traces(
         let num_added_cols = num_added_vals.div_ceil(1 << max_log_row_count);
         let remainder = num_added_vals % (1 << max_log_row_count);
         if next_multiple == offset {
-            // TODO: this is buggy right now, add another elt to start indices.
-            tracing::warn!("WARNING: unexpected exact multiple of 2^log_stacking_height");
+            let end_idx = (offset >> 1) as u32;
+            unsafe {
+                backend
+                    .copy_nonoverlapping(
+                        &end_idx as *const u32 as *const u8,
+                        start_indices.as_mut_ptr().add(cols_so_far) as *mut u8,
+                        std::mem::size_of::<u32>(),
+                        slop_alloc::mem::CopyDirection::HostToDevice,
+                    )
+                    .unwrap();
+            }
             return (next_multiple, cols_so_far, 0, table_index);
         }
         let dst_dense_slice = &mut dense_data[offset..next_multiple];
@@ -1005,6 +1014,8 @@ fn log_chip_stats<A: CudaTracegenAir<Felt>>(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use slop_algebra::PrimeField32;
     use slop_tensor::Tensor;
 
@@ -1015,7 +1026,7 @@ mod tests {
     use sp1_gpu_tracing::init_tracer;
     use sp1_gpu_utils::Felt;
 
-    use crate::{count_and_add, fill_buf};
+    use crate::{count_and_add, fill_buf, generate_jagged_traces, Trace};
 
     use rand::SeedableRng;
     use rand::{rngs::StdRng, Rng};
@@ -1055,6 +1066,50 @@ mod tests {
             let host_generated_buf = DeviceBuffer::from_raw(generated_buf).to_host().unwrap();
 
             assert_eq!(host_copied_buf.as_slice(), host_generated_buf.as_slice());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_generate_jagged_traces_writes_final_start_index() {
+        run_in_place(|scope| async move {
+            let traces: BTreeMap<String, Trace<TaskScope>> = BTreeMap::new();
+
+            let initial_offset = 8usize;
+            let initial_cols = 0usize;
+            let log_stacking_height = 3u32;
+            let max_log_row_count = 4u32;
+
+            let mut dense_data: Buffer<Felt, TaskScope> =
+                Buffer::with_capacity_in(16, scope.clone());
+            let mut col_index: Buffer<u32, TaskScope> =
+                Buffer::with_capacity_in(8, scope.clone());
+
+            let sentinel = 0xDEADBEEFu32;
+            let host_start = vec![sentinel; 4];
+            let host_start_buf = Buffer::from(host_start);
+            let mut start_indices =
+                DeviceBuffer::from_host(&host_start_buf, &scope).unwrap().into_inner();
+
+            let mut column_heights = vec![123u32];
+
+            let (_final_offset, final_cols, _padding, _table_index) = generate_jagged_traces(
+                &mut dense_data,
+                &mut col_index,
+                &mut start_indices,
+                &mut column_heights,
+                traces,
+                initial_offset,
+                initial_cols,
+                log_stacking_height,
+                max_log_row_count,
+            )
+            .await;
+
+            assert_eq!(final_cols, initial_cols);
+
+            let host_start_indices = DeviceBuffer::from_raw(start_indices).to_host().unwrap();
+            assert_eq!(host_start_indices[initial_cols], (initial_offset >> 1) as u32);
         })
         .await;
     }
