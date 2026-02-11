@@ -104,6 +104,17 @@ impl ShapeChecker {
         *self = Self::new(self.program_len, clk, self.sharding_threshold);
     }
 
+    pub fn exact_trace_area(&self) -> u64 {
+        self.heights
+            .iter()
+            .map(|(id, &height)| height.next_multiple_of(32) * self.costs[id])
+            .sum::<u64>()
+            + BYTE_NUM_ROWS * 6
+            + 32 * self.costs[RiscvAirId::MemoryBump] // if something doesn't work out maybe remove
+            + RANGE_NUM_ROWS
+            + self.program_len.next_multiple_of(32)
+    }
+
     /// Check if the shard limit has been reached.
     ///
     /// # Returns
@@ -111,6 +122,11 @@ impl ShapeChecker {
     /// Whether the shard limit has been reached.
     #[inline]
     pub fn check_shard_limit(&self) -> bool {
+        let main_trace_area = self.exact_trace_area();
+        if main_trace_area >= (1 << 28) && main_trace_area % (1 << 21) == 0 {
+            tracing::warn!("triggered multiple of 2^21: {:?} {:?}", self.heights, main_trace_area);
+            return true;
+        }
         self.trace_area >= self.sharding_threshold.element_threshold
             || self.max_height >= self.sharding_threshold.height_threshold
     }
