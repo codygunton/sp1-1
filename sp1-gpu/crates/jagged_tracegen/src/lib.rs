@@ -283,7 +283,7 @@ async fn generate_jagged_traces(
         }
     }
 
-    let result = async {
+    let result = tracing::trace_span!("final padding").in_scope(|| {
         // Now, pad the dense data with 0's to the next multiple of 2^log_stacking_height.
         let next_multiple = offset.next_multiple_of(1 << log_stacking_height);
         let num_added_vals = next_multiple - offset;
@@ -291,17 +291,22 @@ async fn generate_jagged_traces(
         let remainder = num_added_vals % (1 << max_log_row_count);
         if next_multiple == offset {
             tracing::warn!("Perfect multiple of 2^{}", log_stacking_height);
-            let end_idx = (offset >> 1) as u32;
+            // commit_multilinears always creates at least one padding column via .max(1).
+            // Write two identical start indices for the phantom 0-height padding column
+            // so that start_indices stays in sync with row_counts/column_counts.
+            let end_idx = [(offset >> 1) as u32, (offset >> 1) as u32];
             unsafe {
                 backend
                     .copy_nonoverlapping(
-                        &end_idx as *const u32 as *const u8,
+                        end_idx.as_ptr() as *const u8,
                         start_indices.as_mut_ptr().add(cols_so_far) as *mut u8,
-                        std::mem::size_of::<u32>(),
+                        std::mem::size_of::<u32>() * 2,
                         slop_alloc::mem::CopyDirection::HostToDevice,
                     )
                     .unwrap();
             }
+            column_heights.push(0);
+            cols_so_far += 1;
             return (next_multiple, cols_so_far, 0, table_index);
         }
         let dst_dense_slice = &mut dense_data[offset..next_multiple];
@@ -347,9 +352,7 @@ async fn generate_jagged_traces(
         column_heights.push((remainder >> 1) as u32);
         cols_so_far += num_added_cols;
         (next_multiple, cols_so_far, next_multiple - offset, table_index)
-    }
-    .instrument(tracing::trace_span!("final padding"))
-    .await;
+    });
 
     result
 }
@@ -1031,8 +1034,9 @@ mod tests {
         run_in_place, DeviceBuffer, DevicePoint, DeviceTensor, PinnedBuffer, TaskScope,
     };
     use sp1_gpu_tracing::init_tracer;
+    use sp1_gpu_utils::traces::{JaggedTraceMle, TraceDenseData};
     use sp1_gpu_utils::{Ext, Felt};
-    use sp1_gpu_zerocheck::primitives::evaluate_jagged_mle_chunked;
+    use sp1_gpu_zerocheck::primitives::{evaluate_jagged_mle_chunked, evaluate_traces};
     use sp1_hypercube::prover::{DefaultTraceGenerator, ProverSemaphore, TraceGenerator};
 
     use crate::test_utils::tracegen_setup::{self, CORE_MAX_LOG_ROW_COUNT, LOG_STACKING_HEIGHT};
@@ -1048,7 +1052,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_jagged_tracegen() {
-        sp1_core_machine::utils::setup_logger();
+        init_tracer();
         let (machine, record, program) = tracegen_setup::setup().await;
 
         let mut rng = StdRng::seed_from_u64(4);
@@ -1194,45 +1198,208 @@ mod tests {
         .await;
     }
 
+    /// Tests the "Perfect multiple of 2^{}" edge case in generate_jagged_traces.
+    /// Constructs traces whose total size is exactly 2^log_stacking_height, builds a
+    /// JaggedTraceMle, evaluates it via the GPU pipeline, and compares against a CPU reference.
     #[tokio::test]
-    async fn test_generate_jagged_traces_writes_final_start_index() {
+    #[serial]
+    async fn test_generate_jagged_traces_perfect_multiple() {
+        init_tracer();
         run_in_place(|scope| async move {
-            let traces: BTreeMap<String, Trace<TaskScope>> = BTreeMap::new();
-
-            let initial_offset = 8usize;
-            let initial_cols = 0usize;
             let log_stacking_height = 3u32;
             let max_log_row_count = 4u32;
+            let num_rows = 8usize; // 2^3
+            let num_cols = 1usize;
+            let trace_size = num_rows * num_cols; // 8 = 2^3, perfect multiple
+            assert_eq!(trace_size, 1 << log_stacking_height);
 
+            let mut rng = StdRng::seed_from_u64(42);
+
+            // Build a trace Mle on device.
+            let host_data: Vec<Felt> =
+                (0..trace_size).map(|i| Felt::from_canonical_u32(i as u32 + 1)).collect();
+            let host_buf = Buffer::from(host_data.clone());
+            let device_buf = DeviceBuffer::from_host(&host_buf, &scope).unwrap().into_inner();
+            let dims: slop_tensor::Dimensions = [num_cols, num_rows].try_into().unwrap();
+            let tensor = Tensor { storage: device_buf, dimensions: dims };
+            let mle: Mle<Felt, TaskScope> = Mle::new(tensor);
+
+            let mut traces = BTreeMap::new();
+            traces.insert("TestChip".to_string(), Trace::Real(mle));
+
+            // Allocate device buffers.
             let mut dense_data: Buffer<Felt, TaskScope> =
+                Buffer::with_capacity_in(trace_size * 2, scope.clone());
+            let mut col_index: Buffer<u32, TaskScope> =
+                Buffer::with_capacity_in(trace_size, scope.clone());
+            let mut start_indices: Buffer<u32, TaskScope> =
                 Buffer::with_capacity_in(16, scope.clone());
-            let mut col_index: Buffer<u32, TaskScope> = Buffer::with_capacity_in(8, scope.clone());
+            let mut column_heights: Vec<u32> = Vec::new();
 
-            let sentinel = 0xDEADBEEFu32;
-            let host_start = vec![sentinel; 4];
-            let host_start_buf = Buffer::from(host_start);
-            let mut start_indices =
-                DeviceBuffer::from_host(&host_start_buf, &scope).unwrap().into_inner();
+            unsafe {
+                dense_data.assume_init();
+                col_index.assume_init();
+                start_indices.assume_init();
+            }
 
-            let mut column_heights = vec![123u32];
-
-            let (_final_offset, final_cols, _padding, _table_index) = generate_jagged_traces(
+            let (final_offset, final_cols, padding, table_index) = generate_jagged_traces(
                 &mut dense_data,
                 &mut col_index,
                 &mut start_indices,
                 &mut column_heights,
                 traces,
-                initial_offset,
-                initial_cols,
+                0,
+                0,
                 log_stacking_height,
                 max_log_row_count,
             )
             .await;
 
-            assert_eq!(final_cols, initial_cols);
+            assert_eq!(padding, 0, "Expected zero padding for perfect multiple");
 
-            let host_start_indices = DeviceBuffer::from_raw(start_indices).to_host().unwrap();
-            assert_eq!(host_start_indices[initial_cols], (initial_offset >> 1) as u32);
+            // Set buffer lengths to match actual data.
+            unsafe {
+                dense_data.set_len(final_offset);
+                col_index.set_len(final_offset >> 1);
+                start_indices.set_len(final_cols + 1);
+            }
+
+            // Build a JaggedTraceMle for evaluation.
+            let trace_dense_data = TraceDenseData {
+                dense: dense_data,
+                preprocessed_offset: final_offset,
+                preprocessed_cols: final_cols,
+                preprocessed_table_index: table_index,
+                main_table_index: BTreeMap::new(),
+                preprocessed_padding: padding,
+                main_padding: 0,
+            };
+            let jagged_trace_mle =
+                JaggedTraceMle::new(trace_dense_data, col_index, start_indices, column_heights);
+
+            // Evaluate the jagged MLE at a random point using the GPU pipeline.
+            let z_row: Point<Ext, _> = Point::rand(&mut rng, max_log_row_count);
+            let gpu_evals = evaluate_traces(&jagged_trace_mle, &z_row);
+
+            // Compute reference evaluations on CPU using standard Mle::eval_at.
+            let max_rows = 1usize << max_log_row_count;
+            for (col, &eval) in gpu_evals.iter().enumerate().take(num_cols) {
+                let col_start = col * num_rows;
+                let col_end = col_start + num_rows;
+                let col_data = &host_data[col_start..col_end];
+
+                // Pad column to 2^max_log_row_count rows (zeros beyond num_rows).
+                let mut padded: Vec<Felt> = col_data.to_vec();
+                padded.resize(max_rows, Felt::zero());
+                let cpu_mle = Mle::<Felt, _>::from_buffer(Buffer::from(padded));
+                let expected = cpu_mle.eval_at(&z_row).evaluations().as_slice()[0];
+
+                assert_eq!(
+                    eval, expected,
+                    "Column {col} evaluation mismatch: GPU={:?}, CPU={:?}",
+                    eval, expected
+                );
+            }
+        })
+        .await;
+    }
+
+    /// Same evaluation test but with a NON-perfect-multiple trace size (goes through the normal
+    /// padding path). This should pass, confirming the bug is specific to the perfect-multiple path.
+    #[tokio::test]
+    #[serial]
+    async fn test_generate_jagged_traces_not_perfect_multiple() {
+        init_tracer();
+        run_in_place(|scope| async move {
+            let log_stacking_height = 3u32;
+            let max_log_row_count = 4u32;
+            let num_rows = 4usize;
+            let num_cols = 1usize;
+            let trace_size = num_rows * num_cols; // 4, NOT a multiple of 2^3=8
+            assert_ne!(trace_size % (1 << log_stacking_height), 0);
+
+            let mut rng = StdRng::seed_from_u64(42);
+
+            let host_data: Vec<Felt> =
+                (0..trace_size).map(|i| Felt::from_canonical_u32(i as u32 + 1)).collect();
+            let host_buf = Buffer::from(host_data.clone());
+            let device_buf = DeviceBuffer::from_host(&host_buf, &scope).unwrap().into_inner();
+            let dims: slop_tensor::Dimensions = [num_cols, num_rows].try_into().unwrap();
+            let tensor = Tensor { storage: device_buf, dimensions: dims };
+            let mle: Mle<Felt, TaskScope> = Mle::new(tensor);
+
+            let mut traces = BTreeMap::new();
+            traces.insert("TestChip".to_string(), Trace::Real(mle));
+
+            let mut dense_data: Buffer<Felt, TaskScope> =
+                Buffer::with_capacity_in(trace_size * 4, scope.clone());
+            let mut col_index: Buffer<u32, TaskScope> =
+                Buffer::with_capacity_in(trace_size * 2, scope.clone());
+            let mut start_indices: Buffer<u32, TaskScope> =
+                Buffer::with_capacity_in(16, scope.clone());
+            let mut column_heights: Vec<u32> = Vec::new();
+
+            unsafe {
+                dense_data.assume_init();
+                col_index.assume_init();
+                start_indices.assume_init();
+            }
+
+            let (final_offset, final_cols, padding, table_index) = generate_jagged_traces(
+                &mut dense_data,
+                &mut col_index,
+                &mut start_indices,
+                &mut column_heights,
+                traces,
+                0,
+                0,
+                log_stacking_height,
+                max_log_row_count,
+            )
+            .await;
+
+            assert!(padding > 0, "Expected non-zero padding for non-perfect-multiple");
+
+            unsafe {
+                dense_data.set_len(final_offset);
+                col_index.set_len(final_offset >> 1);
+                start_indices.set_len(final_cols + 1);
+            }
+
+            let trace_dense_data = TraceDenseData {
+                dense: dense_data,
+                preprocessed_offset: final_offset,
+                preprocessed_cols: final_cols,
+                preprocessed_table_index: table_index,
+                main_table_index: BTreeMap::new(),
+                preprocessed_padding: padding,
+                main_padding: 0,
+            };
+            let jagged_trace_mle =
+                JaggedTraceMle::new(trace_dense_data, col_index, start_indices, column_heights);
+
+            let z_row: Point<Ext, _> = Point::rand(&mut rng, max_log_row_count);
+            let gpu_evals = evaluate_traces(&jagged_trace_mle, &z_row);
+
+            // Only check the real columns (skip padding columns).
+            let max_rows = 1usize << max_log_row_count;
+            for (col, &eval) in gpu_evals.iter().enumerate().take(num_cols) {
+                let col_start = col * num_rows;
+                let col_end = col_start + num_rows;
+                let col_data = &host_data[col_start..col_end];
+
+                // Pad column to 2^max_log_row_count rows (zeros beyond num_rows).
+                let mut padded: Vec<Felt> = col_data.to_vec();
+                padded.resize(max_rows, Felt::zero());
+                let cpu_mle = Mle::<Felt, _>::from_buffer(Buffer::from(padded));
+                let expected = cpu_mle.eval_at(&z_row).evaluations().as_slice()[0];
+
+                assert_eq!(
+                    eval, expected,
+                    "Column {col} evaluation mismatch: GPU={:?}, CPU={:?}",
+                    eval, expected
+                );
+            }
         })
         .await;
     }
