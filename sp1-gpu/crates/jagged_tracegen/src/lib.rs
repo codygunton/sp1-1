@@ -287,7 +287,7 @@ async fn generate_jagged_traces(
         // Now, pad the dense data with 0's to the next multiple of 2^log_stacking_height.
         let next_multiple = offset.next_multiple_of(1 << log_stacking_height);
         let num_added_vals = next_multiple - offset;
-        let num_added_cols = num_added_vals.div_ceil(1 << max_log_row_count);
+        let num_added_cols = num_added_vals.div_ceil(1 << max_log_row_count).max(1);
         let remainder = num_added_vals % (1 << max_log_row_count);
         if next_multiple == offset {
             tracing::warn!("Perfect multiple of 2^{}", log_stacking_height);
