@@ -179,7 +179,7 @@ async fn main() {
                     prover
                         .prove(&pk, stdin.clone())
                         .strategy(FulfillmentStrategy::Auction)
-                        .auction_timeout(Duration::from_secs(60))
+                        .auction_timeout(Duration::from_mins(1))
                         .min_auction_period(1)
                         .cycle_limit(100_000_000_000)
                         .gas_limit(10_000_000_000)
