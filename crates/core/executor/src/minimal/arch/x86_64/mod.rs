@@ -90,7 +90,9 @@ impl MinimalExecutor {
         self.input.push_back(input.to_vec());
     }
 
-    /// Execute the program. Returning a trace chunk if the program has not completed.
+    /// Execute the program. Returning a trace chunk if:
+    /// 1. The program has not completed.
+    /// 2. Tracing mode is on.
     pub fn execute_chunk(&mut self) -> Option<TraceChunkRaw> {
         if !self.input.is_empty() {
             self.compiled.set_input_buffer(std::mem::take(&mut self.input));
@@ -98,6 +100,13 @@ impl MinimalExecutor {
 
         // SAFETY: The backend is assumed to output valid JIT functions.
         unsafe { self.compiled.call() }
+    }
+
+    /// Run the program till the end.
+    pub fn run_to_end(&mut self) {
+        while !self.is_done() {
+            self.execute_chunk();
+        }
     }
 
     /// Get the registers of the JIT function.

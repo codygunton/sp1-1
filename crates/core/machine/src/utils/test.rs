@@ -28,7 +28,7 @@ pub async fn run_test(
     for buf in &inputs.buffer {
         executor.with_input(buf);
     }
-    while executor.execute_chunk().is_some() {}
+    executor.run_to_end();
     let public_values = SP1PublicValues::from(executor.public_values_stream());
 
     let _ = run_test_core(program, inputs, 21, 22).await?;
@@ -45,7 +45,7 @@ pub async fn run_test_small_trace(
     for buf in &inputs.buffer {
         executor.with_input(buf);
     }
-    while executor.execute_chunk().is_some() {}
+    executor.run_to_end();
     let public_values = SP1PublicValues::from(executor.public_values_stream());
 
     let _ = run_test_core(program, inputs, 20, 23).await?;

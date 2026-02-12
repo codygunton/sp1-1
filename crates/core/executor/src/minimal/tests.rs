@@ -63,7 +63,7 @@ mod differential_tests {
         let mut native_executor = NativeExecutor::new(program.clone(), false, None);
         let native_time = {
             let start = std::time::Instant::now();
-            while native_executor.execute_chunk().is_some() {}
+            native_executor.run_to_end();
             start.elapsed()
         };
 
@@ -71,7 +71,7 @@ mod differential_tests {
         let mut portable_executor = MinimalExecutor::new(program.clone(), false, None);
         let portable_time = {
             let start = std::time::Instant::now();
-            while portable_executor.execute_chunk().is_some() {}
+            portable_executor.run_to_end();
             start.elapsed()
         };
 
@@ -108,7 +108,7 @@ mod differential_tests {
         for i in 0..5 {
             portable_executor.with_input(&serialize(&vec![i; i]).unwrap());
         }
-        while portable_executor.execute_chunk().is_some() {}
+        portable_executor.run_to_end();
 
         // Run the native x86_64 executor
         let mut native_executor = NativeExecutor::new(program.clone(), false, None);
@@ -116,7 +116,7 @@ mod differential_tests {
         for i in 0..5 {
             native_executor.with_input(&serialize(&vec![i; i]).unwrap());
         }
-        while native_executor.execute_chunk().is_some() {}
+        native_executor.run_to_end();
 
         let (is_equal, report) = compare_states(
             &program,
@@ -268,8 +268,8 @@ mod differential_tests {
             let mut native = NativeExecutor::new(program.clone(), true, None);
             let native_rx = native.new_debug_receiver().expect("Failed to create debug receiver");
 
-            s.spawn(move || while portable.execute_chunk().is_some() {});
-            s.spawn(move || while native.execute_chunk().is_some() {});
+            s.spawn(move || portable.run_to_end());
+            s.spawn(move || native.run_to_end());
             s.spawn(move || {
                 let mut got_prev: Option<debug::State> = None;
                 let mut expected_prev: Option<debug::State> = None;

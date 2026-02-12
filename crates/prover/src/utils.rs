@@ -75,7 +75,7 @@ pub fn get_cycles(elf: &[u8], stdin: &SP1Stdin) -> u64 {
     for buf in &stdin.buffer {
         executor.with_input(buf);
     }
-    while executor.execute_chunk().is_some() {}
+    executor.run_to_end();
     executor.global_clk()
 }
 

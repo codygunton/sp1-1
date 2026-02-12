@@ -336,7 +336,9 @@ impl MinimalExecutor {
         self.input.push_back(input.to_vec());
     }
 
-    /// Execute the program. Returning a trace chunk if the program has not completed.
+    /// Execute the program. Returning a trace chunk if:
+    /// 1. The program has not completed.
+    /// 2. Tracing mode is on.
     #[allow(clippy::redundant_closure_for_method_calls)]
     pub fn execute_chunk(&mut self) -> Option<TraceChunkRaw> {
         if self.is_done() {
@@ -394,6 +396,13 @@ impl MinimalExecutor {
                     .collect(),
             )
         })
+    }
+
+    /// Run the program till the end.
+    pub fn run_to_end(&mut self) {
+        while !self.is_done() {
+            self.execute_chunk();
+        }
     }
 
     /// Check if the program has halted.

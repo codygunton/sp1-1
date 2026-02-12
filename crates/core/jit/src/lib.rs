@@ -259,6 +259,11 @@ impl JitFunction {
         })
     }
 
+    /// Return true if tracing mode is enabled
+    pub fn tracing(&self) -> bool {
+        self.trace_buf_size > 0
+    }
+
     /// Write the initial memory image to the JIT memory.
     ///
     /// # Panics
@@ -330,7 +335,7 @@ impl JitFunction {
         // Ensure the memory pointer is aligned to the alignment of the u64.
         let align_offset = self.memory.as_ptr().align_offset(std::mem::align_of::<u64>());
         let mem_ptr = self.memory.as_mut_ptr().add(align_offset);
-        let tracing = self.trace_buf_size > 0;
+        let tracing = self.tracing();
 
         // We want to skip any hints that the previous chunk read.
         let start_hint_lens = self.hints.len();
