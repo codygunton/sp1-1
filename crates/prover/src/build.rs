@@ -215,9 +215,16 @@ pub fn get_groth16_vkey_hash(build_dir: &Path) -> Result<[u8; 32]> {
     Ok(Sha256::digest(vk_bin_bytes).into())
 }
 
-/// Get the vk root as a hex string.
+/// Get the vk root as a hex string. Always returns exactly 64 hex characters (32 bytes).
 pub fn get_vk_root() -> String {
-    hex::encode(*VK_ROOT_BYTES)
+    let encoded = hex::encode(*VK_ROOT_BYTES);
+    debug_assert_eq!(
+        encoded.len(),
+        64,
+        "VK_ROOT hex must be exactly 64 chars (32 bytes), got {}",
+        encoded.len()
+    );
+    encoded
 }
 
 /// Build the Plonk contracts.
@@ -228,7 +235,7 @@ pub fn build_plonk_bn254_contracts(build_dir: &Path) -> Result<()> {
     let sp1_verifier_str = include_str!("../assets/SP1VerifierPlonk.txt")
         .replace("{SP1_CIRCUIT_VERSION}", SP1_CIRCUIT_VERSION)
         .replace("{VERIFIER_HASH}", format!("0x{}", hex::encode(vkey_hash)).as_str())
-        .replace("{VK_ROOT}", format!("0x00{}", vk_root).as_str()) // Pad with a 0 byte because it's in a bn254.
+        .replace("{VK_ROOT}", format!("0x{}", vk_root).as_str())
         .replace("{PROOF_SYSTEM}", "Plonk");
     std::fs::write(sp1_verifier_path, sp1_verifier_str)?;
     Ok(())
@@ -242,7 +249,7 @@ pub fn build_groth16_bn254_contracts(build_dir: &Path) -> Result<()> {
     let sp1_verifier_str = include_str!("../assets/SP1VerifierGroth16.txt")
         .replace("{SP1_CIRCUIT_VERSION}", SP1_CIRCUIT_VERSION)
         .replace("{VERIFIER_HASH}", format!("0x{}", hex::encode(vkey_hash)).as_str())
-        .replace("{VK_ROOT}", format!("0x00{}", vk_root).as_str()) // Pad with a 0 byte because it's in a bn254.
+        .replace("{VK_ROOT}", format!("0x{}", vk_root).as_str())
         .replace("{PROOF_SYSTEM}", "Groth16");
     std::fs::write(sp1_verifier_path, sp1_verifier_str)?;
     Ok(())
