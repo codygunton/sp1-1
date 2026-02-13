@@ -603,15 +603,23 @@ interface ISP1VerifierWithHash is ISP1Verifier {
             .expect("build_plonk_bn254_contracts failed");
 
         // Verify no template placeholders remain.
-        for (name, file) in
-            [("Groth16", "SP1VerifierGroth16.sol"), ("Plonk", "SP1VerifierPlonk.sol")]
-        {
+        let mut artifacts_mismatch = false;
+        for (name, file, artifacts) in [
+            ("Groth16", "SP1VerifierGroth16.sol", &groth16_artifacts),
+            ("Plonk", "SP1VerifierPlonk.sol", &plonk_artifacts),
+        ] {
             let content = std::fs::read_to_string(version_dir.join(file)).unwrap();
             for placeholder in ["{SP1_CIRCUIT_VERSION}", "{VERIFIER_HASH}", "{VK_ROOT}"] {
                 assert!(
                     !content.contains(placeholder),
                     "SP1Verifier{name} has unfilled placeholder: {placeholder}",
                 );
+            }
+            // Check that generated contracts match the pre-built ones in artifacts.
+            let expected = std::fs::read_to_string(artifacts.join(file)).unwrap();
+            if content != expected {
+                eprintln!("WARNING: SP1Verifier{name} does not match the pre-built contract in circuit artifacts");
+                artifacts_mismatch = true;
             }
         }
 
@@ -629,6 +637,11 @@ interface ISP1VerifierWithHash is ISP1Verifier {
             "forge build failed:\nstdout: {}\nstderr: {}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
+        );
+
+        assert!(
+            !artifacts_mismatch,
+            "generated contracts do not match pre-built circuit artifacts (see warnings above)",
         );
     }
 }
