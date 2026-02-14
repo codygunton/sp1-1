@@ -65,6 +65,13 @@ contract SP1Verifier is Groth16Verifier, ISP1VerifierWithHash {
         bytes32 publicValuesDigest = hashPublicValues(publicValues);
         (uint256 exitCode, uint256 vkRoot, uint256 nonce, uint256[8] memory proof) = abi.decode(proofBytes[4:], (uint256, uint256, uint256, uint256[8]));
 
+        if (exitCode != 0) {
+            revert InvalidExitCode();
+        }
+        if (vkRoot != expectedVkRoot) {
+            revert InvalidVkRoot();
+        }
+
         uint256[5] memory inputs;
         inputs[0] = uint256(programVKey);
         inputs[1] = uint256(publicValuesDigest);
@@ -72,12 +79,6 @@ contract SP1Verifier is Groth16Verifier, ISP1VerifierWithHash {
         inputs[3] = vkRoot;
         inputs[4] = nonce;
 
-        if (exitCode != 0) {
-            revert InvalidExitCode();
-        }
-        if (vkRoot != expectedVkRoot) {
-            revert InvalidVkRoot();
-        }
         this.Verify(proof, inputs);
     }
 }
