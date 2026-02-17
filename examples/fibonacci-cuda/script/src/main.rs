@@ -34,7 +34,7 @@ async fn main() {
     let pk = client.setup(ELF).await.unwrap();
     let proof = client.prove(&pk, stdin.clone()).compressed().await.unwrap();
     client.verify(&proof, &pk.verifying_key(), None).unwrap();
-    
+
     handle.await.unwrap();
 
     println!("generated and verified proofs");

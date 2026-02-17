@@ -16,7 +16,7 @@ async fn main() {
 
     // Verify proof.
     client.verify(&proof, pk.verifying_key(), None).expect("verification failed");
-    
+
     // Test a round trip of proof serialization and deserialization.
     proof.save("proof-with-pis.bin").expect("saving proof failed");
     let deserialized_proof =
@@ -27,4 +27,3 @@ async fn main() {
 
     println!("successfully generated and verified proof for the program!")
 }
-

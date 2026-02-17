@@ -53,7 +53,7 @@ async fn main() {
 
     // // Verify the deserialized proof.
     // client.verify(&deserialized_proof, pk.verifying_key()).expect("verification failed");
- 
+
     println!("successfully generated and verified proof for the program!")
 }
 

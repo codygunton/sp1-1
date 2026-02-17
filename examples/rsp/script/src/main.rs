@@ -34,7 +34,6 @@ async fn main() {
     let buffer = bincode::serialize(&client_input).unwrap();
     stdin.write_vec(buffer);
 
-
     let client = ProverClient::from_env().await;
     let now = std::time::Instant::now();
     let (mut public_values, report) = client.execute(ELF, stdin.clone()).await.unwrap();

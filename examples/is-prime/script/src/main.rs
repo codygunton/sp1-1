@@ -1,6 +1,6 @@
 //! A program that takes a number `n` as input, and writes if `n` is prime as an output.
-use sp1_sdk::ProverClient;
 use sp1_sdk::prelude::*;
+use sp1_sdk::ProverClient;
 
 const ELF: Elf = include_elf!("is-prime-program");
 

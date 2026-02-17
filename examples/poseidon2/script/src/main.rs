@@ -17,18 +17,16 @@ async fn main() {
     let client = ProverClient::from_env().await;
 
     // Execute the program using the `ProverClient.execute` method, without generating a proof.
-    
+
     let (_, report) = client.execute(ELF, stdin.clone()).await.unwrap();
     println!("executed program {:?} ", report);
- 
 
     // Generate the proof for the given program and input.
     let pk = client.setup(ELF).await.unwrap();
     let proof = client.prove(&pk, stdin.clone()).core().await.unwrap();
     println!("generated proof");
-    
+
     // Verify proof and public values
     client.verify(&proof, pk.verifying_key(), None).expect("verification failed");
     println!("verified proof");
-    
 }

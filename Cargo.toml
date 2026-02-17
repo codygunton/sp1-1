@@ -146,7 +146,7 @@ sp1-gpu-utils = { version = "6.0.0-rc.1", path = "sp1-gpu/crates/utils" }
 sp1-gpu-zerocheck = { version = "6.0.0-rc.1", path = "sp1-gpu/crates/zerocheck" }
 
 p3-air = "0.3.1-succinct"
-p3-baby-bear = { version = "0.3.1-succinct", features = ["nightly-features"] }
+p3-baby-bear = "0.3.1-succinct"
 p3-bn254-fr = "0.3.1-succinct"
 p3-challenger = "0.3.1-succinct"
 p3-commit = "0.3.1-succinct"
@@ -327,6 +327,25 @@ default.extend-ignore-re = [
   "numer",
 ]
 default.extend-ignore-words-re = ["(?i)groth", "TRE"]
+
+[patch.crates-io]
+p3-air = { path = "../Plonky3/air" }
+p3-baby-bear = { path = "../Plonky3/baby-bear" }
+p3-bn254-fr = { path = "../Plonky3/bn254-fr" }
+p3-challenger = { path = "../Plonky3/challenger" }
+p3-commit = { path = "../Plonky3/commit" }
+p3-dft = { path = "../Plonky3/dft" }
+p3-field = { path = "../Plonky3/field" }
+p3-fri = { path = "../Plonky3/fri" }
+p3-keccak-air = { path = "../Plonky3/keccak-air" }
+p3-koala-bear = { path = "../Plonky3/koala-bear" }
+p3-matrix = { path = "../Plonky3/matrix" }
+p3-maybe-rayon = { path = "../Plonky3/maybe-rayon" }
+p3-merkle-tree = { path = "../Plonky3/merkle-tree" }
+p3-poseidon2 = { path = "../Plonky3/poseidon2" }
+p3-symmetric = { path = "../Plonky3/symmetric" }
+p3-uni-stark = { path = "../Plonky3/uni-stark" }
+p3-util = { path = "../Plonky3/util" }
 
 [workspace.lints.clippy]
 print_stdout = "deny"

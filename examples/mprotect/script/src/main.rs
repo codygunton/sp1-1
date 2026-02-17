@@ -1,5 +1,5 @@
-use sp1_sdk::ProverClient;
 use sp1_sdk::prelude::*;
+use sp1_sdk::ProverClient;
 
 const ELF: Elf = include_elf!("mprotect-program");
 
@@ -12,7 +12,7 @@ async fn main() {
 
     // No stdin needed for this simple example
     let stdin = SP1Stdin::new();
-    
+
     let client = ProverClient::from_env().await;
 
     // Execute the program first
@@ -21,14 +21,14 @@ async fn main() {
 
     println!("Program executed successfully!");
     println!("Public output: {:?}", public_output);
-    
+
     // Print execution statistics
     println!(
         "Executed program with {} total instructions",
         execution_report.total_instruction_count()
     );
     println!("Total syscalls: {}", execution_report.total_syscall_count());
-    
+
     // Print syscall breakdown to see mprotect calls
     println!("Syscall breakdown:");
     for (syscall_code, count) in execution_report.syscall_counts.iter() {

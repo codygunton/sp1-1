@@ -1,8 +1,8 @@
 use sp1_sdk::prelude::*;
 use sp1_sdk::ProverClient;
 
-use rand::thread_rng;
 use elliptic_curve::sec1::ToEncodedPoint;
+use rand::thread_rng;
 
 const ELF: Elf = include_elf!("secp256k1-program");
 
@@ -19,7 +19,7 @@ async fn main() {
     let compressed = public_key.to_sec1_bytes();
 
     let stdin = SP1Stdin::from(&compressed);
-    
+
     let client = ProverClient::from_env().await;
     let pk = client.setup(ELF).await.expect("setup failed");
     let proof = client.prove(&pk, stdin).core().await.expect("proving failed");
@@ -28,4 +28,3 @@ async fn main() {
     client.verify(&proof, pk.verifying_key(), None).expect("verification failed");
     println!("successfully generated and verified proof for the program!")
 }
-
