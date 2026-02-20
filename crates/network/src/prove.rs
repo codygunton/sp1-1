@@ -45,14 +45,17 @@ impl NetworkProveBuilder<'_> {
     ///
     /// # Example
     /// ```rust,no_run
-    /// use sp1_sdk::{Elf, Prover, ProverClient, SP1Stdin};
+    /// use sp1_build::Elf;
+    /// use sp1_core_machine::io::SP1Stdin;
+    /// use sp1_network::NetworkProverBuilder;
+    /// use sp1_sdk_types::Prover;
     /// use std::time::Duration;
     ///
     /// tokio_test::block_on(async {
     ///     let elf = Elf::Static(&[1, 2, 3]);
     ///     let stdin = SP1Stdin::new();
     ///
-    ///     let client = ProverClient::builder().network().build().await;
+    ///     let client = NetworkProverBuilder::new().build().await;
     ///     let pk = client.setup(elf).await.unwrap();
     ///     let proof = client.prove(&pk, stdin).timeout(Duration::from_secs(60)).await.unwrap();
     /// });
@@ -73,13 +76,16 @@ impl NetworkProveBuilder<'_> {
     ///
     /// # Example
     /// ```rust,no_run
-    /// use sp1_sdk::{Elf, Prover, ProverClient, SP1Stdin};
+    /// use sp1_build::Elf;
+    /// use sp1_core_machine::io::SP1Stdin;
+    /// use sp1_network::NetworkProverBuilder;
+    /// use sp1_sdk_types::Prover;
     ///
     /// tokio_test::block_on(async {
     ///     let elf = Elf::Static(&[1, 2, 3]);
     ///     let stdin = SP1Stdin::new();
     ///
-    ///     let client = ProverClient::builder().network().build().await;
+    ///     let client = NetworkProverBuilder::new().build().await;
     ///     let pk = client.setup(elf).await.unwrap();
     ///     let proof = client.prove(&pk, stdin).skip_simulation(true).await.unwrap();
     /// });
@@ -97,13 +103,16 @@ impl NetworkProveBuilder<'_> {
     ///
     /// # Example
     /// ```rust,no_run
-    /// use sp1_sdk::{network::FulfillmentStrategy, Elf, Prover, ProverClient, SP1Stdin};
+    /// use sp1_build::Elf;
+    /// use sp1_core_machine::io::SP1Stdin;
+    /// use sp1_network::{FulfillmentStrategy, NetworkProverBuilder};
+    /// use sp1_sdk_types::Prover;
     ///
     /// tokio_test::block_on(async {
     ///     let elf = Elf::Static(&[1, 2, 3]);
     ///     let stdin = SP1Stdin::new();
     ///
-    ///     let client = ProverClient::builder().network().build().await;
+    ///     let client = NetworkProverBuilder::new().build().await;
     ///     let pk = client.setup(elf).await.unwrap();
     ///     let proof = client.prove(&pk, stdin).strategy(FulfillmentStrategy::Hosted).await.unwrap();
     /// });
@@ -127,13 +136,16 @@ impl NetworkProveBuilder<'_> {
     ///
     /// # Example
     /// ```rust,no_run
-    /// use sp1_sdk::{Elf, Prover, ProverClient, SP1Stdin};
+    /// use sp1_build::Elf;
+    /// use sp1_core_machine::io::SP1Stdin;
+    /// use sp1_network::NetworkProverBuilder;
+    /// use sp1_sdk_types::Prover;
     ///
     /// tokio_test::block_on(async {
     ///     let elf = Elf::Static(&[1, 2, 3]);
     ///     let stdin = SP1Stdin::new();
     ///
-    ///     let client = ProverClient::builder().network().build().await;
+    ///     let client = NetworkProverBuilder::new().build().await;
     ///     let pk = client.setup(elf).await.unwrap();
     ///     let proof = client
     ///         .prove(&pk, stdin)
@@ -162,13 +174,16 @@ impl NetworkProveBuilder<'_> {
     ///
     /// # Example
     /// ```rust,no_run
-    /// use sp1_sdk::{Elf, Prover, ProverClient, SP1Stdin};
+    /// use sp1_build::Elf;
+    /// use sp1_core_machine::io::SP1Stdin;
+    /// use sp1_network::NetworkProverBuilder;
+    /// use sp1_sdk_types::Prover;
     ///
     /// tokio_test::block_on(async {
     ///     let elf = Elf::Static(&[1, 2, 3]);
     ///     let stdin = SP1Stdin::new();
     ///
-    ///     let client = ProverClient::builder().network().build().await;
+    ///     let client = NetworkProverBuilder::new().build().await;
     ///     let pk = client.setup(elf).await.unwrap();
     ///     let proof = client
     ///         .prove(&pk, stdin)
@@ -220,14 +235,17 @@ impl NetworkProveBuilder<'_> {
     ///
     /// # Example
     /// ```rust,no_run
-    /// use sp1_sdk::{Elf, Prover, ProverClient, SP1Stdin};
+    /// use sp1_build::Elf;
+    /// use sp1_core_machine::io::SP1Stdin;
+    /// use sp1_network::NetworkProverBuilder;
+    /// use sp1_sdk_types::Prover;
     /// use std::time::Duration;
     ///
     /// tokio_test::block_on(async {
     ///     let elf = Elf::Static(&[1, 2, 3]);
     ///     let stdin = SP1Stdin::new();
     ///
-    ///     let client = ProverClient::builder().network().build().await;
+    ///     let client = NetworkProverBuilder::new().build().await;
     ///     let pk = client.setup(elf).await.unwrap();
     ///     let builder = client.prove(&pk, stdin).min_auction_period(60).await;
     /// });
@@ -251,14 +269,17 @@ impl NetworkProveBuilder<'_> {
     /// # Example
     /// ```rust,no_run
     /// use alloy_primitives::Address;
-    /// use sp1_sdk::{Elf, Prover, ProverClient, SP1Stdin};
+    /// use sp1_build::Elf;
+    /// use sp1_core_machine::io::SP1Stdin;
+    /// use sp1_network::NetworkProverBuilder;
+    /// use sp1_sdk_types::Prover;
     /// use std::str::FromStr;
     ///
     /// tokio_test::block_on(async {
     ///     let elf = Elf::Static(&[1, 2, 3]);
     ///     let stdin = SP1Stdin::new();
     ///
-    ///     let client = ProverClient::builder().network().build().await;
+    ///     let client = NetworkProverBuilder::new().build().await;
     ///     let pk = client.setup(elf).await.unwrap();
     ///     let whitelist =
     ///         vec![Address::from_str("0x123").unwrap(), Address::from_str("0x456").unwrap()];
@@ -281,14 +302,17 @@ impl NetworkProveBuilder<'_> {
     /// # Example
     /// ```rust,no_run
     /// use alloy_primitives::Address;
-    /// use sp1_sdk::{Elf, Prover, ProverClient, SP1Stdin};
+    /// use sp1_build::Elf;
+    /// use sp1_core_machine::io::SP1Stdin;
+    /// use sp1_network::NetworkProverBuilder;
+    /// use sp1_sdk_types::Prover;
     /// use std::str::FromStr;
     ///
     /// tokio_test::block_on(async {
     ///     let elf = Elf::Static(&[1, 2, 3]);
     ///     let stdin = SP1Stdin::new();
     ///
-    ///     let client = ProverClient::builder().network().build().await;
+    ///     let client = NetworkProverBuilder::new().build().await;
     ///     let pk = client.setup(elf).await.unwrap();
     ///     let auctioneer = Address::from_str("0x0000000000000000000000000000000000000000").unwrap();
     ///     let proof = client.prove(&pk, stdin).auctioneer(auctioneer).await.unwrap();
@@ -309,14 +333,17 @@ impl NetworkProveBuilder<'_> {
     /// # Example
     /// ```rust,no_run
     /// use alloy_primitives::Address;
-    /// use sp1_sdk::{Elf, Prover, ProverClient, SP1Stdin};
+    /// use sp1_build::Elf;
+    /// use sp1_core_machine::io::SP1Stdin;
+    /// use sp1_network::NetworkProverBuilder;
+    /// use sp1_sdk_types::Prover;
     /// use std::str::FromStr;
     ///
     /// tokio_test::block_on(async {
     ///     let elf = Elf::Static(&[1, 2, 3]);
     ///     let stdin = SP1Stdin::new();
     ///
-    ///     let client = ProverClient::builder().network().build().await;
+    ///     let client = NetworkProverBuilder::new().build().await;
     ///     let pk = client.setup(elf).await.unwrap();
     ///     let executor = Address::from_str("0x0000000000000000000000000000000000000000").unwrap();
     ///     let proof = client.prove(&pk, stdin).executor(executor).await.unwrap();
@@ -337,14 +364,17 @@ impl NetworkProveBuilder<'_> {
     /// # Example
     /// ```rust,no_run
     /// use alloy_primitives::Address;
-    /// use sp1_sdk::{Elf, Prover, ProverClient, SP1Stdin};
+    /// use sp1_build::Elf;
+    /// use sp1_core_machine::io::SP1Stdin;
+    /// use sp1_network::NetworkProverBuilder;
+    /// use sp1_sdk_types::Prover;
     /// use std::str::FromStr;
     ///
     /// tokio_test::block_on(async {
     ///     let elf = Elf::Static(&[1, 2, 3]);
     ///     let stdin = SP1Stdin::new();
     ///
-    ///     let client = ProverClient::builder().network().build().await;
+    ///     let client = NetworkProverBuilder::new().build().await;
     ///     let pk = client.setup(elf).await.unwrap();
     ///     let verifier = Address::from_str("0x0000000000000000000000000000000000000000").unwrap();
     ///     let proof = client.prove(&pk, stdin).verifier(verifier).await.unwrap();
@@ -365,14 +395,17 @@ impl NetworkProveBuilder<'_> {
     /// # Example
     /// ```rust,no_run
     /// use alloy_primitives::Address;
-    /// use sp1_sdk::{Elf, Prover, ProverClient, SP1Stdin};
+    /// use sp1_build::Elf;
+    /// use sp1_core_machine::io::SP1Stdin;
+    /// use sp1_network::NetworkProverBuilder;
+    /// use sp1_sdk_types::Prover;
     /// use std::str::FromStr;
     ///
     /// tokio_test::block_on(async {
     ///     let elf = Elf::Static(&[1, 2, 3]);
     ///     let stdin = SP1Stdin::new();
     ///
-    ///     let client = ProverClient::builder().network().build().await;
+    ///     let client = NetworkProverBuilder::new().build().await;
     ///     let pk = client.setup(elf).await.unwrap();
     ///     let treasury = Address::from_str("0x0000000000000000000000000000000000000000").unwrap();
     ///     let proof = client.prove(&pk, stdin).treasury(treasury).await.unwrap();
@@ -396,16 +429,18 @@ impl NetworkProveBuilder<'_> {
     /// # Example
     /// ```rust,no_run
     /// use alloy_primitives::Address;
-    /// use sp1_sdk::{Elf, Prover, ProverClient, SP1Stdin};
+    /// use sp1_build::Elf;
+    /// use sp1_core_machine::io::SP1Stdin;
+    /// use sp1_network::NetworkProverBuilder;
+    /// use sp1_sdk_types::Prover;
     /// use std::str::FromStr;
     ///
     /// tokio_test::block_on(async {
     ///     let elf = Elf::Static(&[1, 2, 3]);
     ///     let stdin = SP1Stdin::new();
     ///
-    ///     let client = ProverClient::builder().network().build().await;
+    ///     let client = NetworkProverBuilder::new().build().await;
     ///     let pk = client.setup(elf).await.unwrap();
-    ///     let treasury = Address::from_str("0x0000000000000000000000000000000000000000").unwrap();
     ///     let proof = client
     ///         .prove(&pk, stdin)
     ///         .max_price_per_pgu(1_000_000_000_000_000_000u64) // Set 1 PROVE (18 decimals).
@@ -430,14 +465,17 @@ impl NetworkProveBuilder<'_> {
     ///
     /// # Example
     /// ```rust,no_run
-    /// use sp1_sdk::{Elf, Prover, ProverClient, SP1Stdin};
+    /// use sp1_build::Elf;
+    /// use sp1_core_machine::io::SP1Stdin;
+    /// use sp1_network::NetworkProverBuilder;
+    /// use sp1_sdk_types::Prover;
     /// use std::time::Duration;
     ///
     /// tokio_test::block_on(async {
     ///     let elf = Elf::Static(&[1, 2, 3]);
     ///     let stdin = SP1Stdin::new();
     ///
-    ///     let client = ProverClient::builder().network().build().await;
+    ///     let client = NetworkProverBuilder::new().build().await;
     ///     let pk = client.setup(elf).await.unwrap();
     ///     let proof = client
     ///         .prove(&pk, stdin)
@@ -461,13 +499,16 @@ impl NetworkProveBuilder<'_> {
     ///
     /// # Example
     /// ```rust,no_run
-    /// use sp1_sdk::{Elf, Prover, ProverClient, SP1Stdin};
+    /// use sp1_build::Elf;
+    /// use sp1_core_machine::io::SP1Stdin;
+    /// use sp1_network::NetworkProverBuilder;
+    /// use sp1_sdk_types::Prover;
     ///
     /// tokio_test::block_on(async {
     ///     let elf = Elf::Static(&[1, 2, 3]);
     ///     let stdin = SP1Stdin::new();
     ///
-    ///     let client = ProverClient::builder().network().build().await;
+    ///     let client = NetworkProverBuilder::new().build().await;
     ///     let pk = client.setup(elf).await.unwrap();
     ///     let request_id = client.prove(&pk, stdin).request().await.unwrap();
     /// })

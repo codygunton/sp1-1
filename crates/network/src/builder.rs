@@ -39,9 +39,11 @@ impl NetworkProverBuilder {
     ///
     /// # Example
     /// ```rust,no_run
-    /// use sp1_sdk::ProverClient;
+    /// use sp1_network::NetworkProverBuilder;
     ///
-    /// let prover = ProverClient::builder().network().private_key("...").build();
+    /// # tokio_test::block_on(async {
+    /// let prover = NetworkProverBuilder::new().private_key("...").build().await;
+    /// # });
     /// ```
     #[must_use]
     pub fn private_key(mut self, private_key: &str) -> Self {
@@ -57,9 +59,11 @@ impl NetworkProverBuilder {
     ///
     /// # Example
     /// ```rust,no_run
-    /// use sp1_sdk::ProverClient;
+    /// use sp1_network::NetworkProverBuilder;
     ///
-    /// let prover = ProverClient::builder().network().rpc_url("...").build();
+    /// # tokio_test::block_on(async {
+    /// let prover = NetworkProverBuilder::new().rpc_url("...").build().await;
+    /// # });
     /// ```
     #[must_use]
     pub fn rpc_url(mut self, rpc_url: &str) -> Self {
@@ -75,9 +79,11 @@ impl NetworkProverBuilder {
     ///
     /// # Example
     /// ```rust,no_run
-    /// use sp1_sdk::ProverClient;
+    /// use sp1_network::NetworkProverBuilder;
     ///
-    /// let prover = ProverClient::builder().network().private().build();
+    /// # tokio_test::block_on(async {
+    /// let prover = NetworkProverBuilder::new().private().build().await;
+    /// # });
     /// ```
     #[must_use]
     pub fn private(mut self) -> Self {
@@ -103,22 +109,24 @@ impl NetworkProverBuilder {
     ///
     /// Using a local private key:
     /// ```rust,no_run
-    /// use sp1_sdk::{network::signer::NetworkSigner, ProverClient};
+    /// use sp1_network::{signer::NetworkSigner, NetworkProverBuilder};
     ///
+    /// # tokio_test::block_on(async {
     /// let private_key = "...";
     /// let signer = NetworkSigner::local(private_key).unwrap();
-    /// let prover = ProverClient::builder().network().signer(signer).build();
+    /// let prover = NetworkProverBuilder::new().signer(signer).build().await;
+    /// # });
     /// ```
     ///
     /// Using AWS KMS:
     /// ```rust,no_run
-    /// use sp1_sdk::{network::signer::NetworkSigner, ProverClient};
+    /// use sp1_network::{signer::NetworkSigner, NetworkProverBuilder};
     ///
-    /// # async fn example() {
+    /// # tokio_test::block_on(async {
     /// let kms_key_arn = "arn:aws:kms:us-east-1:123456789:key/key-id";
     /// let signer = NetworkSigner::aws_kms(kms_key_arn).await.unwrap();
-    /// let prover = ProverClient::builder().network().signer(signer).build();
-    /// # }
+    /// let prover = NetworkProverBuilder::new().signer(signer).build().await;
+    /// # });
     /// ```
     #[must_use]
     pub fn signer(mut self, signer: NetworkSigner) -> Self {
@@ -138,29 +146,33 @@ impl NetworkProverBuilder {
     ///
     /// Using a private key:
     /// ```rust,no_run
-    /// use sp1_sdk::ProverClient;
+    /// use sp1_network::NetworkProverBuilder;
     ///
-    /// let prover = ProverClient::builder().network().private_key("...").rpc_url("...").build();
+    /// # tokio_test::block_on(async {
+    /// let prover = NetworkProverBuilder::new().private_key("...").rpc_url("...").build().await;
+    /// # });
     /// ```
     ///
     /// Using a local signer:
     /// ```rust,no_run
-    /// use sp1_sdk::{network::signer::NetworkSigner, ProverClient};
+    /// use sp1_network::{signer::NetworkSigner, NetworkProverBuilder};
     ///
+    /// # tokio_test::block_on(async {
     /// let private_key = "...";
     /// let signer = NetworkSigner::local(private_key).unwrap();
-    /// let prover = ProverClient::builder().network().signer(signer).build();
+    /// let prover = NetworkProverBuilder::new().signer(signer).build().await;
+    /// # });
     /// ```
     ///
     /// Using AWS KMS:
     /// ```rust,no_run
-    /// use sp1_sdk::{network::signer::NetworkSigner, ProverClient};
+    /// use sp1_network::{signer::NetworkSigner, NetworkProverBuilder};
     ///
-    /// # async fn example() {
+    /// # tokio_test::block_on(async {
     /// let kms_key_arn = "arn:aws:kms:us-east-1:123456789:key/key-id";
     /// let signer = NetworkSigner::aws_kms(kms_key_arn).await.unwrap();
-    /// let prover = ProverClient::builder().network().signer(signer).build();
-    /// # }
+    /// let prover = NetworkProverBuilder::new().signer(signer).build().await;
+    /// # });
     /// ```
     #[must_use]
     pub async fn build(self) -> NetworkProver {

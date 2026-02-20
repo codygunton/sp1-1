@@ -65,5 +65,8 @@ tonic = { workspace = true, features = ["tls", "tls-roots"] }
 tee-2fa = []
 reserved-capacity = []
 
+[dev-dependencies]
+tokio-test = { workspace = true }
+
 [lints]
 workspace = true

@@ -32,7 +32,7 @@ pub enum ValidationError {
 /// # Examples
 ///
 /// ```
-/// use sp1_sdk::network::{
+/// use sp1_network::{
 ///     validation::validate_strategy_compatibility, FulfillmentStrategy, NetworkMode,
 /// };
 ///

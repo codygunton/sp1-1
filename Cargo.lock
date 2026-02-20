@@ -7353,6 +7353,7 @@ dependencies = [
  "sp1-sdk-types",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-test",
  "tonic 0.12.3",
  "tracing",
  "twirp-rs",

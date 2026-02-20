@@ -114,17 +114,14 @@ impl NetworkProver {
     /// # Examples
     /// Using a private key string:
     /// ```rust,no_run
-    /// use sp1_sdk::{network::NetworkMode, NetworkProver};
+    /// use sp1_network::{NetworkMode, prover::NetworkProver};
     ///
     /// let prover = NetworkProver::new("0x...", "...", NetworkMode::Mainnet);
     /// ```
     ///
     /// Using a `NetworkSigner`:
     /// ```rust,no_run
-    /// use sp1_sdk::{
-    ///     network::{signer::NetworkSigner, NetworkMode},
-    ///     NetworkProver,
-    /// };
+    /// use sp1_network::{signer::NetworkSigner, NetworkMode, prover::NetworkProver};
     ///
     /// let signer = NetworkSigner::local("0x...").unwrap();
     /// let prover = NetworkProver::new(signer, "...", NetworkMode::Reserved);
@@ -170,10 +167,10 @@ impl NetworkProver {
     ///
     /// # Example
     /// ```rust,no_run
-    /// use sp1_sdk::{ProverClient, SP1Stdin};
+    /// use sp1_network::NetworkProverBuilder;
     ///
     /// tokio_test::block_on(async {
-    ///     let client = ProverClient::builder().network().build().await;
+    ///     let client = NetworkProverBuilder::new().build().await;
     ///     let balance = client.get_balance().await.unwrap();
     /// })
     /// ```
@@ -192,11 +189,13 @@ impl NetworkProver {
     ///
     /// # Example
     /// ```rust,no_run
-    /// use sp1_sdk::{Elf, Prover, ProverClient, ProvingKey, SP1Stdin};
+    /// use sp1_build::Elf;
+    /// use sp1_network::NetworkProverBuilder;
+    /// use sp1_sdk_types::{Prover, ProvingKey};
     ///
     /// tokio_test::block_on(async {
     ///     let elf = Elf::Static(&[1, 2, 3]);
-    ///     let client = ProverClient::builder().network().build().await;
+    ///     let client = NetworkProverBuilder::new().build().await;
     ///     let pk = client.setup(elf).await.unwrap();
     ///     let vk_hash = client.register_program(&pk.verifying_key(), pk.elf()).await.unwrap();
     /// });
@@ -212,9 +211,10 @@ impl NetworkProver {
     ///
     /// # Example
     /// ```rust,no_run
-    /// use sp1_sdk::{ProverClient, SP1ProofMode};
+    /// use sp1_network::NetworkProverBuilder;
+    /// use sp1_sdk_types::SP1ProofMode;
     /// tokio_test::block_on(async {
-    ///     let client = ProverClient::builder().network().build().await;
+    ///     let client = NetworkProverBuilder::new().build().await;
     ///     let params = client.get_proof_request_params(SP1ProofMode::Compressed).await.unwrap();
     /// })
     /// ```
@@ -242,11 +242,12 @@ impl NetworkProver {
     ///
     /// # Example
     /// ```rust,no_run
-    /// use sp1_sdk::{network::B256, ProverClient};
+    /// use alloy_primitives::B256;
+    /// use sp1_network::NetworkProverBuilder;
     ///
     /// tokio_test::block_on(async {
     ///     let request_id = B256::from_slice(&vec![1u8; 32]);
-    ///     let client = ProverClient::builder().network().build().await;
+    ///     let client = NetworkProverBuilder::new().build().await;
     ///     let (status, maybe_proof) = client.get_proof_status(request_id).await.unwrap();
     /// })
     /// ```
@@ -270,11 +271,12 @@ impl NetworkProver {
     ///
     /// # Example
     /// ```rust,no_run
-    /// use sp1_sdk::{network::B256, ProverClient};
+    /// use alloy_primitives::B256;
+    /// use sp1_network::NetworkProverBuilder;
     ///
     /// tokio_test::block_on(async {
     ///     let request_id = B256::from_slice(&vec![1u8; 32]);
-    ///     let client = ProverClient::builder().network().build().await;
+    ///     let client = NetworkProverBuilder::new().build().await;
     ///     let request = client.get_proof_request(request_id).await.unwrap();
     /// })
     /// ```
@@ -294,11 +296,12 @@ impl NetworkProver {
     ///
     /// # Example
     /// ```rust,no_run
-    /// use sp1_sdk::{network::B256, ProverClient};
+    /// use alloy_primitives::B256;
+    /// use sp1_network::NetworkProverBuilder;
     ///
     /// tokio_test::block_on(async {
     ///     let request_id = B256::from_slice(&vec![1u8; 32]);
-    ///     let client = ProverClient::builder().network().build().await;
+    ///     let client = NetworkProverBuilder::new().build().await;
     ///     let (maybe_proof, fulfillment_status) =
     ///         client.process_proof_status(request_id, None).await.unwrap();
     /// })
