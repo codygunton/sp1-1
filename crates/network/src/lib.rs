@@ -22,7 +22,9 @@ pub mod utils;
 
 use std::time::Duration;
 
-pub use crate::{builder::NetworkProverBuilder, client::NetworkClient, proto::types::FulfillmentStrategy};
+pub use crate::{
+    builder::NetworkProverBuilder, client::NetworkClient, proto::types::FulfillmentStrategy,
+};
 pub use alloy_primitives::{Address, B256};
 pub use error::*;
 pub use utils::{
