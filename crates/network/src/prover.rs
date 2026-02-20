@@ -7,26 +7,22 @@ use std::time::{Duration, Instant};
 
 use super::prove::NetworkProveBuilder;
 use crate::{
-    network::{
-        client::NetworkClient,
-        proto::{
-            types::{
-                ExecutionStatus, FulfillmentStatus, FulfillmentStrategy, ProofMode, ProofRequest,
-            },
-            GetProofRequestStatusResponse,
-        },
-        signer::NetworkSigner,
-        tee::{client::Client as TeeClient, verify_tee_proof},
-        Error, NetworkMode, DEFAULT_AUCTION_TIMEOUT_DURATION, DEFAULT_GAS_LIMIT,
-        MAINNET_EXPLORER_URL, MAINNET_RPC_URL, PRIVATE_EXPLORER_URL, PRIVATE_NETWORK_RPC_URL,
-        RESERVED_EXPLORER_URL, RESERVED_RPC_URL, TEE_NETWORK_RPC_URL,
+    client::NetworkClient,
+    proto::{
+        types::{ExecutionStatus, FulfillmentStatus, FulfillmentStrategy, ProofMode, ProofRequest},
+        GetProofRequestParamsResponse, GetProofRequestStatusResponse,
     },
-    prover::{verify_proof, BaseProveRequest, SendFutureResult},
-    ProofFromNetwork, Prover, SP1ProofMode, SP1ProofWithPublicValues, SP1ProvingKey,
-    SP1VerifyingKey,
+    signer::NetworkSigner,
+    tee::{client::Client as TeeClient, verify_tee_proof},
+    Error, NetworkMode, DEFAULT_AUCTION_TIMEOUT_DURATION, DEFAULT_GAS_LIMIT, MAINNET_EXPLORER_URL,
+    MAINNET_RPC_URL, PRIVATE_EXPLORER_URL, PRIVATE_NETWORK_RPC_URL, RESERVED_EXPLORER_URL,
+    RESERVED_RPC_URL, TEE_NETWORK_RPC_URL,
 };
-
-use crate::network::proto::GetProofRequestParamsResponse;
+use sp1_sdk_types::{
+    verify_proof, BaseProveRequest, ProofFromNetwork, Prover, SP1ProofMode,
+    SP1ProofWithPublicValues, SP1ProvingKey, SP1VerificationError, SP1VerifyingKey,
+    SendFutureResult,
+};
 
 use alloy_primitives::{Address, B256, U256};
 use anyhow::{Context, Result};
@@ -97,7 +93,7 @@ impl Prover for NetworkProver {
         proof: &SP1ProofWithPublicValues,
         vkey: &SP1VerifyingKey,
         status_code: Option<StatusCode>,
-    ) -> Result<(), crate::SP1VerificationError> {
+    ) -> Result<(), SP1VerificationError> {
         if let Some(tee_proof) = &proof.tee_proof {
             verify_tee_proof(&self.tee_signers, tee_proof, vkey, proof.public_values.as_ref())?;
         }
@@ -701,7 +697,7 @@ impl NetworkProver {
                                 let mut rpc = self.client.auction_prover_network_client().await?;
                                 let fallback_whitelist = rpc
                                     .get_provers_by_uptime(
-                                        crate::network::proto::auction_types::GetProversByUptimeRequest {
+                                        crate::proto::auction_types::GetProversByUptimeRequest {
                                             high_availability_only: true,
                                         },
                                     )

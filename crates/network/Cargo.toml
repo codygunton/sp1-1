@@ -1,0 +1,69 @@
+[package]
+name = "sp1-network"
+description = "SP1 prover network client"
+readme = "../../README.md"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+keywords = { workspace = true }
+categories = { workspace = true }
+
+[dependencies]
+sp1-sdk-types = { workspace = true }
+sp1-prover = { workspace = true }
+sp1-core-executor = { workspace = true }
+sp1-core-machine = { workspace = true }
+sp1-build = { workspace = true }
+sp1-prover-types = { workspace = true }
+
+prost = { workspace = true }
+twirp = { workspace = true }
+reqwest = { workspace = true, features = [
+  "rustls-tls",
+  "trust-dns",
+  "stream",
+  "json",
+] }
+reqwest-middleware = { workspace = true }
+backoff = { workspace = true, features = ["tokio"] }
+zstd = { workspace = true }
+aws-config = { workspace = true }
+aws-sdk-kms = { workspace = true }
+rustls = { workspace = true, features = ["ring"] }
+alloy-signer = { workspace = true }
+alloy-signer-aws = { workspace = true }
+alloy-signer-local = { workspace = true }
+alloy-primitives = { workspace = true, features = ["k256", "serde"] }
+k256 = { workspace = true, features = ["serde"] }
+eventsource-stream = { workspace = true }
+
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+bincode = { workspace = true }
+cfg-if = { workspace = true }
+futures = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = [
+  "fs",
+  "io-util",
+  "rt",
+  "sync",
+  "time",
+  "rt-multi-thread",
+] }
+tracing = { workspace = true }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+tonic = { workspace = true, features = ["tls", "tls-webpki-roots"] }
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+tonic = { workspace = true, features = ["tls", "tls-roots"] }
+
+[features]
+tee-2fa = []
+reserved-capacity = []
+
+[lints]
+workspace = true

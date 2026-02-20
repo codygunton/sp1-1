@@ -6661,6 +6661,7 @@ dependencies = [
  "sp1-primitives",
  "sp1-prover",
  "sp1-prover-types",
+ "sp1-sdk-types",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -7321,6 +7322,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "sp1-network"
+version = "6.0.0"
+dependencies = [
+ "alloy-primitives",
+ "alloy-signer",
+ "alloy-signer-aws",
+ "alloy-signer-local",
+ "anyhow",
+ "async-trait",
+ "aws-config",
+ "aws-sdk-kms",
+ "backoff",
+ "bincode",
+ "cfg-if",
+ "eventsource-stream",
+ "futures",
+ "hex",
+ "k256",
+ "prost 0.13.5",
+ "reqwest",
+ "reqwest-middleware",
+ "rustls 0.23.36",
+ "serde",
+ "sp1-build",
+ "sp1-core-executor",
+ "sp1-core-machine",
+ "sp1-prover",
+ "sp1-prover-types",
+ "sp1-sdk-types",
+ "thiserror 1.0.69",
+ "tokio",
+ "tonic 0.12.3",
+ "tracing",
+ "twirp-rs",
+ "zstd",
+]
+
+[[package]]
 name = "sp1-perf"
 version = "6.0.0"
 dependencies = [
@@ -7594,30 +7633,17 @@ dependencies = [
 name = "sp1-sdk"
 version = "6.0.0"
 dependencies = [
- "alloy-primitives",
- "alloy-signer",
- "alloy-signer-aws",
- "alloy-signer-local",
  "anyhow",
  "async-trait",
- "aws-config",
- "aws-sdk-kms",
- "backoff",
  "bincode",
  "cfg-if",
  "dirs",
- "eventsource-stream",
  "futures",
  "hex",
  "indicatif",
  "itertools 0.14.0",
- "k256",
  "num-bigint 0.4.6",
- "prost 0.13.5",
- "reqwest",
- "reqwest-middleware",
  "rstest 0.26.1",
- "rustls 0.23.36",
  "serde",
  "sha2",
  "slop-algebra",
@@ -7635,11 +7661,13 @@ dependencies = [
  "sp1-core-machine",
  "sp1-cuda",
  "sp1-hypercube",
+ "sp1-network",
  "sp1-primitives",
  "sp1-prover",
  "sp1-prover-types",
  "sp1-recursion-executor",
  "sp1-recursion-gnark-ffi",
+ "sp1-sdk-types",
  "sp1-verifier",
  "strum",
  "tempfile",
@@ -7647,10 +7675,39 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-test",
- "tonic 0.12.3",
  "tracing",
- "twirp-rs",
- "zstd",
+]
+
+[[package]]
+name = "sp1-sdk-types"
+version = "6.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bincode",
+ "futures",
+ "hex",
+ "itertools 0.14.0",
+ "num-bigint 0.4.6",
+ "serde",
+ "slop-algebra",
+ "slop-alloc",
+ "slop-basefold",
+ "slop-commit",
+ "slop-jagged",
+ "slop-multilinear",
+ "slop-sumcheck",
+ "slop-tensor",
+ "sp1-build",
+ "sp1-core-executor",
+ "sp1-core-machine",
+ "sp1-hypercube",
+ "sp1-primitives",
+ "sp1-prover",
+ "sp1-recursion-executor",
+ "sp1-verifier",
+ "thiserror 1.0.69",
+ "tracing",
 ]
 
 [[package]]

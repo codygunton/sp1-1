@@ -7,19 +7,13 @@ pub mod builder;
 /// The CUDA prove request type.
 pub mod prove;
 
-use crate::{
-    prover::{BaseProveRequest, Prover, SendFutureResult},
-    ProvingKey,
-};
+use crate::prover::{BaseProveRequest, Prover, SendFutureResult};
 
 use prove::CudaProveRequest;
 use sp1_core_machine::io::SP1Stdin;
 use sp1_cuda::{CudaClientError, CudaProver as CudaProverImpl, CudaProvingKey};
 use sp1_primitives::Elf;
-use sp1_prover::{
-    worker::{SP1LightNode, SP1NodeCore},
-    SP1VerifyingKey,
-};
+use sp1_prover::worker::{SP1LightNode, SP1NodeCore};
 
 /// A prover that uses the CPU for execution and the CUDA for proving.
 #[derive(Clone)]
@@ -43,15 +37,5 @@ impl Prover for CudaProver {
 
     fn prove<'a>(&'a self, pk: &'a Self::ProvingKey, stdin: SP1Stdin) -> Self::ProveRequest<'a> {
         CudaProveRequest { base: BaseProveRequest::new(self, pk, stdin) }
-    }
-}
-
-impl ProvingKey for CudaProvingKey {
-    fn elf(&self) -> &Elf {
-        self.elf()
-    }
-
-    fn verifying_key(&self) -> &SP1VerifyingKey {
-        self.verifying_key()
     }
 }

@@ -11,7 +11,7 @@ use crate::{
 use sp1_core_executor::SP1CoreOpts;
 
 #[cfg(feature = "network")]
-use crate::NetworkProver;
+use sp1_network::prover::NetworkProver;
 
 pub mod pk;
 /// The module that defines the prove request for the [`EnvProver`].
@@ -97,7 +97,7 @@ impl EnvProver {
                     );
 
                 let network_builder =
-                    crate::network::builder::NetworkProverBuilder::new().private_key(&private_key);
+                    sp1_network::builder::NetworkProverBuilder::new().private_key(&private_key);
 
                 Self::Network(network_builder.build().await)
             }

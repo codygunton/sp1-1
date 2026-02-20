@@ -4,21 +4,18 @@
 
 use alloy_primitives::Address;
 
-use crate::{
-    network::{signer::NetworkSigner, NetworkMode, TEE_NETWORK_RPC_URL},
-    NetworkProver,
-};
+use crate::{prover::NetworkProver, signer::NetworkSigner, NetworkMode, TEE_NETWORK_RPC_URL};
 
 /// A builder for the [`NetworkProver`].
 ///
 /// The builder is used to configure the [`NetworkProver`] before it is built.
 #[derive(Default)]
 pub struct NetworkProverBuilder {
-    pub(crate) private_key: Option<String>,
-    pub(crate) rpc_url: Option<String>,
-    pub(crate) tee_signers: Option<Vec<Address>>,
-    pub(crate) signer: Option<NetworkSigner>,
-    pub(crate) network_mode: Option<NetworkMode>,
+    pub private_key: Option<String>,
+    pub rpc_url: Option<String>,
+    pub tee_signers: Option<Vec<Address>>,
+    pub signer: Option<NetworkSigner>,
+    pub network_mode: Option<NetworkMode>,
 }
 
 impl NetworkProverBuilder {
@@ -193,9 +190,9 @@ impl NetworkProverBuilder {
             Some(tee_signers) => tee_signers,
 
             #[cfg(feature = "tee-2fa")]
-            None => crate::network::retry::retry_operation(
-                || async { crate::network::tee::get_tee_signers().await.map_err(Into::into) },
-                Some(crate::network::retry::DEFAULT_RETRY_TIMEOUT),
+            None => crate::retry::retry_operation(
+                || async { crate::tee::get_tee_signers().await.map_err(Into::into) },
+                Some(crate::retry::DEFAULT_RETRY_TIMEOUT),
                 "get tee signers",
             )
             .await

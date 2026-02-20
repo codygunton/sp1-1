@@ -55,6 +55,16 @@ impl SessionKey {
     }
 }
 
+impl sp1_sdk_types::ProvingKey for CudaProvingKey {
+    fn elf(&self) -> &Elf {
+        self.elf()
+    }
+
+    fn verifying_key(&self) -> &SP1VerifyingKey {
+        self.verifying_key()
+    }
+}
+
 impl Drop for SessionKey {
     fn drop(&mut self) {
         let client = self.client.clone();

@@ -7,12 +7,10 @@ use std::time::Duration;
 use alloy_primitives::{Address, B256};
 use anyhow::Result;
 
-use crate::{
-    prover::BaseProveRequest, utils::sp1_dump, NetworkProver, ProveRequest,
-    SP1ProofWithPublicValues,
-};
+use crate::{prover::NetworkProver, validation};
+use sp1_sdk_types::{utils::sp1_dump, BaseProveRequest, ProveRequest, SP1ProofWithPublicValues};
 
-use super::{proto::types::FulfillmentStrategy, validation};
+use super::proto::types::FulfillmentStrategy;
 
 use std::{
     future::{Future, IntoFuture},
@@ -21,7 +19,7 @@ use std::{
 
 /// A builder for creating a proof request to the network.
 pub struct NetworkProveBuilder<'a> {
-    pub(crate) base: BaseProveRequest<'a, NetworkProver>,
+    pub base: BaseProveRequest<'a, NetworkProver>,
     pub(crate) timeout: Option<Duration>,
     pub(crate) strategy: FulfillmentStrategy,
     pub(crate) skip_simulation: bool,

@@ -24,7 +24,7 @@ use super::{
     utils::{sign_message, Signable},
     NetworkMode, MAINNET_EXPLORER_URL, RESERVED_EXPLORER_URL,
 };
-use crate::network::proto::{
+use crate::proto::{
     artifact::{artifact_store_client::ArtifactStoreClient, ArtifactType, CreateArtifactRequest},
     // Import the clients for both auction and base.
     auction_network::prover_network_client::ProverNetworkClient as AuctionProverNetworkClient,
@@ -848,7 +848,7 @@ impl NetworkClient {
 
 #[cfg(test)]
 mod test {
-    use crate::network::{signer::NetworkSigner, NetworkMode, RESERVED_RPC_URL};
+    use crate::{signer::NetworkSigner, NetworkMode, RESERVED_RPC_URL};
 
     #[test]
     fn test_can_create_network_client_with_0x_bytes() {

@@ -1,9 +1,7 @@
-use crate::{
-    network::{signer::NetworkSigner, utils::sign_raw},
-    SP1Stdin,
-};
+use crate::{signer::NetworkSigner, utils::sign_raw};
 use alloy_primitives::{Address, Signature as AlloySignature};
 use serde::{Deserialize, Serialize};
+use sp1_sdk_types::SP1Stdin;
 
 use k256::ecdsa::Signature;
 

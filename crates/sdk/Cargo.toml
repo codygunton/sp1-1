@@ -10,17 +10,8 @@ keywords = { workspace = true }
 categories = { workspace = true }
 
 [dependencies]
-prost = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
-twirp = { workspace = true, optional = true }
 async-trait = { workspace = true }
-reqwest-middleware = { workspace = true, optional = true }
-reqwest = { workspace = true, features = [
-  "rustls-tls",
-  "trust-dns",
-  "stream",
-  "json",
-], optional = true }
 anyhow = { workspace = true }
 sp1-prover = { workspace = true }
 sp1-verifier = { workspace = true }
@@ -63,28 +54,10 @@ sp1-primitives = { workspace = true }
 sp1-prover-types = { workspace = true }
 sp1-recursion-gnark-ffi = { workspace = true }
 itertools = { workspace = true }
-aws-config = { workspace = true, optional = true }
-aws-sdk-kms = { workspace = true, optional = true }
-rustls = { workspace = true, features = ["ring"], optional = true }
-alloy-signer = { workspace = true, optional = true }
-alloy-signer-aws = { workspace = true, optional = true }
-alloy-signer-local = { workspace = true, optional = true }
-alloy-primitives = { workspace = true, features = [
-  "k256",
-  "serde",
-], optional = true }
-backoff = { workspace = true, features = ["tokio"], optional = true }
-zstd = { workspace = true, optional = true }
 num-bigint = { workspace = true }
 sha2 = { workspace = true }
-# TEE Dependencies
-k256 = { workspace = true, features = ["serde"] } # Signing
-eventsource-stream = { workspace = true }         # SSE Extenstion for reqwest
-
-[target.'cfg(target_os = "ios")'.dependencies]
-tonic = { workspace = true, features = ["tls", "tls-webpki-roots"], optional = true }
-[target.'cfg(not(target_os = "ios"))'.dependencies]
-tonic = { workspace = true, features = ["tls", "tls-roots"], optional = true }
+sp1-sdk-types = { workspace = true }
+sp1-network = { workspace = true, optional = true }
 
 [dev-dependencies]
 test-artifacts = { path = "../test-artifacts" }
@@ -95,28 +68,9 @@ rstest = { workspace = true }
 [features]
 default = []
 native-gnark = ["sp1-prover/native-gnark"]
-# TODO: Once alloy has a 1.* release, we can likely remove this feature flag, as there will be less
-# dependency resolution issues.
-network = [
-  "dep:prost",
-  "dep:aws-config",
-  "dep:aws-sdk-kms",
-  "dep:rustls",
-  "dep:alloy-signer",
-  "dep:alloy-signer-aws",
-  "dep:alloy-signer-local",
-  "dep:alloy-primitives",
-  "dep:reqwest",
-  "dep:twirp",
-  "dep:reqwest-middleware",
-  "dep:tonic",
-  "dep:backoff",
-  "dep:zstd",
-  "dep:aws-sdk-kms",
-  "dep:aws-config",
-]
-tee-2fa = []
-reserved-capacity = ["network"]
+network = ["dep:sp1-network"]
+tee-2fa = ["sp1-network/tee-2fa"]
+reserved-capacity = ["network", "sp1-network/reserved-capacity"]
 cuda = []
 bigint-rug = ["sp1-core-machine/bigint-rug"]
 experimental = ["sp1-prover/experimental"]

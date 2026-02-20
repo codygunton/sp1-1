@@ -4,7 +4,8 @@
 
 use std::fmt;
 
-use crate::{prover::verify_proof, ProvingKey, SP1VerificationError, StatusCode};
+use crate::{ProvingKey, SP1VerificationError, StatusCode};
+use sp1_sdk_types::verify_proof;
 use anyhow::Result;
 use sp1_core_machine::io::SP1Stdin;
 use sp1_primitives::types::Elf;

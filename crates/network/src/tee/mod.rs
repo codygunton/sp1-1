@@ -7,7 +7,7 @@
 
 use sp1_prover::{HashableKey, SP1VerifyingKey};
 
-use crate::SP1VerificationError;
+use sp1_sdk_types::SP1VerificationError;
 
 /// The API for the TEE server.
 pub mod api;
@@ -54,7 +54,7 @@ pub fn verify_tee_proof(
     public_values: &[u8],
 ) -> Result<(), SP1VerificationError> {
     if signers.is_empty() {
-        return Err(crate::SP1VerificationError::Other(anyhow::anyhow!(
+        return Err(SP1VerificationError::Other(anyhow::anyhow!(
             "TEE integrity proof verification is enabled, but no TEE signers are provided"
         )));
     }
@@ -62,8 +62,7 @@ pub fn verify_tee_proof(
     let mut bytes = Vec::new();
 
     // Push the version hash.
-    let version_hash =
-        alloy_primitives::keccak256(crate::network::tee::SP1_TEE_VERSION.to_le_bytes());
+    let version_hash = alloy_primitives::keccak256(crate::tee::SP1_TEE_VERSION.to_le_bytes());
     bytes.extend_from_slice(version_hash.as_ref());
 
     // Push the vkey.
@@ -96,7 +95,7 @@ pub fn verify_tee_proof(
     if signers.contains(&address) {
         Ok(())
     } else {
-        Err(crate::SP1VerificationError::Other(anyhow::anyhow!(
+        Err(SP1VerificationError::Other(anyhow::anyhow!(
             "Invalid TEE proof, signed by unknown address {address}",
         )))
     }

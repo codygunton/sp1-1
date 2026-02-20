@@ -38,9 +38,9 @@ pub mod env;
 
 pub mod install;
 #[cfg(feature = "network")]
-pub mod network;
+pub use sp1_network as network;
 #[cfg(feature = "network")]
-pub use network::prover::NetworkProver;
+pub use sp1_network::prover::NetworkProver;
 
 #[cfg(feature = "blocking")]
 pub mod blocking;

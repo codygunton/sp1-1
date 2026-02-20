@@ -31,6 +31,8 @@ members = [
   "crates/recursion/machine",
   "crates/prover-types",
   "crates/sdk",
+  "crates/sdk-types",
+  "crates/network",
   "crates/test-artifacts",
   "crates/verifier",
   "crates/zkvm/*",
@@ -121,6 +123,8 @@ sp1-recursion-executor = { version = "6.0.0", path = "crates/recursion/executor"
 sp1-recursion-gnark-ffi = { version = "6.0.0", path = "crates/recursion/gnark-ffi", default-features = false }
 sp1-recursion-machine = { version = "6.0.0", path = "crates/recursion/machine", default-features = false }
 sp1-sdk = { version = "6.0.0", path = "crates/sdk", default-features = false }
+sp1-sdk-types = { version = "6.0.0", path = "crates/sdk-types" }
+sp1-network = { version = "6.0.0", path = "crates/network" }
 sp1-verifier = { version = "6.0.0", path = "crates/verifier", default-features = false }
 sp1-zkvm = { version = "6.0.0", path = "crates/zkvm/entrypoint", default-features = false }
 

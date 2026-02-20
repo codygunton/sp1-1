@@ -44,7 +44,7 @@ pub struct Client {
 
 impl Default for Client {
     fn default() -> Self {
-        Self::new(crate::network::DEFAULT_TEE_SERVER_URL)
+        Self::new(crate::DEFAULT_TEE_SERVER_URL)
     }
 }
 

@@ -8,7 +8,7 @@ use crate::{
 };
 
 #[cfg(feature = "network")]
-use crate::network::{builder::NetworkProverBuilder, NetworkMode};
+use sp1_network::{builder::NetworkProverBuilder, NetworkMode};
 
 /// An entrypoint for interacting with the prover for the SP1 RISC-V zkVM.
 ///
