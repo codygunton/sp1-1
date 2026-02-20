@@ -35,6 +35,7 @@ pub use verify::{verify_proof, SP1VerificationError};
 // don't need to depend on all these crates directly.
 pub use sp1_core_executor::StatusCode;
 pub use sp1_core_machine::io::SP1Stdin;
+pub use sp1_hypercube::HashableKey;
 pub use sp1_primitives::types::Elf;
 pub use sp1_prover::{worker::SP1NodeCore, SP1VerifyingKey, SP1_CIRCUIT_VERSION};
 pub use sp1_verifier::{ProofFromNetwork, SP1Proof, SP1ProofMode};
