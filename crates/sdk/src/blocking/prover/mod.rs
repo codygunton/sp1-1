@@ -5,11 +5,11 @@
 use std::fmt;
 
 use crate::{ProvingKey, SP1VerificationError, StatusCode};
-use sp1_sdk_types::verify_proof;
 use anyhow::Result;
 use sp1_core_machine::io::SP1Stdin;
 use sp1_primitives::types::Elf;
 use sp1_prover::{worker::SP1NodeCore, SP1VerifyingKey, SP1_CIRCUIT_VERSION};
+use sp1_sdk_types::verify_proof;
 
 /// The module that exposes the [`ExecuteRequest`] type.
 mod execute;
