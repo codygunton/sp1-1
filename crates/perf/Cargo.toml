@@ -30,7 +30,7 @@ async-scoped = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-test-artifacts = { path = "../test-artifacts" }
+test-artifacts = { path = "../test-artifacts", optional = true }
 
 [[bin]]
 name = "sp1-perf"
@@ -45,6 +45,7 @@ name = "sp1-perf-setup"
 path = "src/setup.rs"
 
 [features]
+bench = ["dep:test-artifacts"]
 bigint-rug = ["sp1-core-executor/bigint-rug"]
 native-gnark = ["sp1-sdk/native-gnark"]
 network = ["sp1-sdk/network"]
