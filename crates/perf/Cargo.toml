@@ -19,7 +19,8 @@ sp1-sdk = { workspace = true }
 p3-baby-bear = { workspace = true }
 sp1-stark = { workspace = true }
 sp1-cuda = { workspace = true }
-test-artifacts = { workspace = true }
+# test-artifacts requires the succinct RISC-V toolchain; not needed for sp1-perf-executor.
+# test-artifacts = { workspace = true }
 tracing = { workspace = true }
 serde_json = { workspace = true }
 rand = "0.8.5"

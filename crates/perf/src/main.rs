@@ -6,7 +6,6 @@ use sp1_cuda::{MoongateServer, SP1CudaProver};
 use sp1_prover::{components::CpuProverComponents, HashableKey, ProverMode};
 use sp1_sdk::{self, Prover, ProverClient, SP1Context, SP1Prover, SP1Stdin};
 use sp1_stark::SP1ProverOpts;
-use test_artifacts::VERIFY_PROOF_ELF;
 
 #[derive(Parser, Clone)]
 #[command(about = "Evaluate the performance of SP1 on programs.")]
