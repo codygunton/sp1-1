@@ -191,9 +191,14 @@ fn execute_minimal(elf: Vec<u8>, stdin: SP1Stdin, trace: bool) {
     while executor.execute_chunk().is_some() {}
     let time = now.elapsed();
 
-    println!("exit code: {}, cycles: {}", executor.exit_code(), executor.global_clk());
+    let exit_code = executor.exit_code();
+    println!("exit code: {exit_code}, cycles: {}", executor.global_clk());
     println!("execution time: {:?}", time);
     println!("mhz: {}", executor.global_clk() as f64 / (time.as_secs_f64() * 1_000_000.0));
+
+    if exit_code != 0 {
+        std::process::exit(1);
+    }
 }
 
 pub fn get_program_and_input(program: String, param: String, local: bool) -> (Vec<u8>, SP1Stdin) {
