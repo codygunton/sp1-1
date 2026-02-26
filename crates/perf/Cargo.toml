@@ -30,7 +30,8 @@ async-scoped = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-test-artifacts = { path = "../test-artifacts" }
+# test-artifacts requires the succinct RISC-V toolchain; not needed for sp1-perf-executor.
+# test-artifacts = { path = "../test-artifacts" }
 
 [[bin]]
 name = "sp1-perf"
