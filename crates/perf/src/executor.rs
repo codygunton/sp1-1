@@ -72,7 +72,11 @@ fn main() {
 
     match args.executor_mode {
         ExecutorMode::Simple => {
-            let (_, execution_duration) = time_operation(|| executor.run_fast());
+            let (result, execution_duration) = time_operation(|| executor.run_fast());
+            if let Err(e) = result {
+                eprintln!("execution error: {e}");
+                std::process::exit(1);
+            }
             println!("Simple mode:");
             println!("cycles: {}", executor.state.global_clk);
             println!(
